@@ -1,0 +1,16 @@
+{
+  "id": "maximum-of-three",
+  "title": "Số lớn nhất",
+  "statement": "Cho ba số nguyên a, b, c. In số lớn nhất.",
+  "sample_input": "4 9 2\n",
+  "sample_output": "9\n",
+  "time_limit_ms": 2000,
+  "memory_limit_mb": 256,
+  "compile_timeout_sec": 15,
+  "tests": [
+    {"input": "4 9 2\n", "output": "9\n", "points": 20},
+    {"input": "-8 -3 -11\n", "output": "-3\n", "points": 30},
+    {"input": "7 7 1\n", "output": "7\n", "points": 25},
+    {"input": "1000000000 0 999999999\n", "output": "1000000000\n", "points": 25}
+  ]
+}
