@@ -15,6 +15,15 @@ Nhịp ván: sau mỗi nước đi hợp lệ engine dừng **2 giây** (`--move
 
 Kiểm thử: `python -m unittest tests.test_ott_engine -v` (luật, lịch, xếp hạng) và, khi server đang chạy, `python tests/e2e_api.py` (chơi trọn một giải 4 đội qua API; thêm `--auto-submit` để thử tự nộp khi hết giờ).
 
+### Cập nhật trực tiếp trên LAN (SSE)
+
+Server đẩy thông báo thay đổi qua `GET /api/v1/stream` (Server-Sent Events) ngay khi có nước đi, đổi trạng thái giải, đăng ký hoặc nộp bot; mọi máy trong LAN đang mở web nhận trong khoảng 0,1 giây thay vì chờ polling. Chân trang web hiện "● Trực tiếp" khi kết nối stream đang hoạt động; nếu mất stream, trình duyệt tự nối lại (1 giây) và các trang vẫn tự làm mới định kỳ.
+
+- Sự kiện chỉ chứa id và bộ đếm (`type`, `id`, `tid`, `status`, `move_count`, `phase`), không có bàn cờ hay dữ liệu bí mật; trang ván đấu nhận sự kiện rồi tải lại `/matches/{id}`, nên quy tắc ẩn bố trí quân vẫn do API quyết định.
+- Các sự kiện dồn nhau được gộp theo (loại, id) trong cửa sổ 80 ms; tối đa 300 kết nối stream (`stream_clients` trong `/api/v1/stats`).
+- Server tiếp tục dùng một luồng cho mỗi kết nối, phù hợp lớp học/LAN nhỏ; không cần cấu hình thêm, chỉ cần máy khác mở `http://<IP máy chạy server>:8080`.
+- Kiểm thử: `python -m unittest tests.test_ott_events -v`.
+
 ### Sandbox Docker cho bot
 
 Runner mặc định `--runner auto`: dùng Docker khi daemon chạy và image đã build, nếu không thì quay về `local` (chỉ để dev). Mỗi lần biên dịch và mỗi bot khi thi đấu chạy trong một container riêng, dùng xong xóa:

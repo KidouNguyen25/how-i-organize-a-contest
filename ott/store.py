@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from judge.database import _hash_password, _verify_password
+from ott.events import HUB
 
 SESSION_TTL = 12 * 60 * 60
 ENGINE_VERSION = "ott-1.0"
@@ -239,6 +240,7 @@ class Store:
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (tid, name, "ott", "1", clock_seconds, "DRAFT", created_by, now(), coding_seconds),
             )
+        HUB.publish("tournament", tid)
         return self.get_tournament(tid)  # type: ignore[return-value]
 
     _TOUR_SQL = (
@@ -267,6 +269,7 @@ class Store:
         cols = ", ".join(f"{k} = ?" for k in fields)
         with self.tx() as con:
             con.execute(f"UPDATE tournaments SET {cols} WHERE id = ?", (*fields.values(), tid))
+        HUB.publish("tournament", tid)
 
     def transition(self, tid: str, allowed: tuple[str, ...], new_status: str, **extra: Any) -> bool:
         sets = ", ".join(["status = ?"] + [f"{k} = ?" for k in extra])
@@ -276,7 +279,10 @@ class Store:
                 f"UPDATE tournaments SET {sets} WHERE id = ? AND status IN ({marks})",
                 (new_status, *extra.values(), tid, *allowed),
             )
-            return cur.rowcount == 1
+            changed = cur.rowcount == 1
+        if changed:
+            HUB.publish("tournament", tid, status=new_status)
+        return changed
 
     # ---------------- entries & bots ----------------
     def create_entry(self, tid: str, user_id: int) -> dict[str, Any]:
@@ -289,6 +295,7 @@ class Store:
                 )
             except sqlite3.IntegrityError:
                 raise StoreError(409, "ENTRY_EXISTS", "This account already has an entry in the tournament.") from None
+        HUB.publish("entry", tid)
         return self.get_entry(eid)  # type: ignore[return-value]
 
     _ENTRY_SQL = (
@@ -324,6 +331,9 @@ class Store:
     def remove_entry(self, entry_id: str) -> None:
         with self.tx() as con:
             con.execute("UPDATE entries SET status = 'REMOVED', bot_submission_id = NULL WHERE id = ?", (entry_id,))
+            row = con.execute("SELECT tournament_id FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        if row:
+            HUB.publish("entry", row["tournament_id"])
 
     def get_draft(self, entry_id: str) -> tuple[str | None, int | None]:
         with self.tx() as con:
@@ -358,6 +368,7 @@ class Store:
                 "UPDATE entries SET bot_submission_id = ?, status = 'READY', submitted_at = ?, draft_source = ?, draft_updated_at = ?, submit_note = NULL WHERE id = ?",
                 (bot_id, stamp, source, stamp, entry_id),
             )
+        HUB.publish("entry", tid)
         return True
 
     def bump_compile(self, entry_id: str, limit: int) -> int:
@@ -378,6 +389,9 @@ class Store:
     def set_submit_note(self, entry_id: str, note: str) -> None:
         with self.tx() as con:
             con.execute("UPDATE entries SET submit_note = ? WHERE id = ? AND submitted_at IS NULL", (note, entry_id))
+            row = con.execute("SELECT tournament_id FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        if row:
+            HUB.publish("entry", row["tournament_id"])
 
     def expired_coding(self) -> list[dict[str, Any]]:
         with self.tx() as con:
@@ -406,6 +420,7 @@ class Store:
                     (str(uuid.uuid4()), tid, r["round_no"], r["leg_no"], r["pairing_no"], r["white"], r["black"],
                      "SCHEDULED", "PLACEMENT", clock_ms, clock_ms, now(), ENGINE_VERSION),
                 )
+        HUB.publish("tournament", tid)
 
     _MATCH_SQL = (
         "SELECT m.*, t.name AS tournament_name, t.clock_seconds, wu.username AS white_name, bu.username AS black_name "
@@ -448,7 +463,11 @@ class Store:
                 "WHERE id = ? AND status IN ('SCHEDULED','PAUSED','RUNNING')",
                 (now(), now(), mid),
             )
-            return cur.rowcount == 1
+            claimed = cur.rowcount == 1
+            row = con.execute("SELECT tournament_id FROM matches WHERE id = ?", (mid,)).fetchone()
+        if claimed and row:
+            HUB.publish("match", mid, tid=row["tournament_id"], status="RUNNING")
+        return claimed
 
     def checkpoint(self, mid: str, white_ms: int, black_ms: int) -> None:
         with self.tx() as con:
@@ -472,6 +491,8 @@ class Store:
                 (json.dumps(state, separators=(",", ":")), state["phase"].upper(), state["side"].upper(), state["move_count"],
                  int(clocks["white"]), int(clocks["black"]), now(), now(), mid),
             )
+            row = con.execute("SELECT tournament_id FROM matches WHERE id = ?", (mid,)).fetchone()
+        HUB.publish("match", mid, tid=row["tournament_id"], status="RUNNING", move_count=state["move_count"], phase=state["phase"])
 
     def save_state(self, mid: str, state: dict[str, Any], clocks: dict[str, int]) -> None:
         with self.tx() as con:
@@ -497,10 +518,16 @@ class Store:
                     "UPDATE tournaments SET status='FINISHED', finished_at=? WHERE id=? AND status='RUNNING'",
                     (now(), row["tournament_id"]),
                 )
+        HUB.publish("match", mid, tid=row["tournament_id"], status="FINISHED")
+        if left == 0:
+            HUB.publish("tournament", row["tournament_id"], status="FINISHED")
 
     def pause_match(self, mid: str, reason: str) -> None:
         with self.tx() as con:
             con.execute("UPDATE matches SET status='PAUSED', result_reason=?, updated_at=? WHERE id=?", (reason, now(), mid))
+            row = con.execute("SELECT tournament_id FROM matches WHERE id = ?", (mid,)).fetchone()
+        if row:
+            HUB.publish("match", mid, tid=row["tournament_id"], status="PAUSED")
 
     def resume_paused(self, tid: str) -> int:
         with self.tx() as con:
@@ -508,7 +535,10 @@ class Store:
                 "UPDATE matches SET status='SCHEDULED', result_reason=NULL, updated_at=? WHERE tournament_id=? AND status='PAUSED'",
                 (now(), tid),
             )
-            return cur.rowcount
+            count = cur.rowcount
+        if count:
+            HUB.publish("tournament", tid)
+        return count
 
     def recover_running(self) -> None:
         with self.tx() as con:

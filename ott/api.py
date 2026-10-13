@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
@@ -18,6 +19,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from ott import engine
+from ott.events import HUB
 from ott.runner import LIVE, LIVE_LOCK, InfraError, artifact_path, compile_source
 from ott.store import Store, StoreError
 from ott.tournament import Dispatcher, byes, round_robin, standings
@@ -272,6 +274,7 @@ class App:
                 "tournaments": len(ts),
                 "running_tournaments": sum(t["status"] == "RUNNING" for t in ts),
                 "running_matches": sum(t["matches_running"] for t in ts),
+                "stream_clients": HUB.clients,
             }
 
         @r("GET", "/tournaments")
@@ -716,6 +719,9 @@ class Handler(BaseHTTPRequestHandler):
             self._static(path)
             return
         sub = path[len("/api/v1"):]
+        if sub == "/stream" and method == "GET":
+            self._stream()
+            return
         user, token = self._session()
         ctx = Ctx(self, user, token)
         try:
@@ -746,6 +752,37 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             LOG.exception("unhandled error for %s %s", method, path)
             self._send(500, {"error": {"code": "INTERNAL", "message": "Internal server error."}}, ctx)
+
+    def _stream(self) -> None:
+        """Server-Sent Events: push change notifications so every client updates immediately."""
+        sub = HUB.subscribe()
+        if sub is None:
+            self._send(503, {"error": {"code": "BUSY", "message": "Too many live connections."}})
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.wfile.write(b"retry: 1000\n\n")
+            self.wfile.write(b'event: hello\ndata: {"type":"hello"}\n\n')
+            self.wfile.flush()
+            while not sub.closed:
+                batch = sub.get_batch(15.0)
+                if batch is None:
+                    self.wfile.write(b": ping\n\n")  # keep-alive through idle proxies / NAT
+                else:
+                    for event in batch:
+                        self.wfile.write(b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n")
+                self.wfile.flush()
+        except (OSError, ValueError):
+            pass  # client disconnected
+        finally:
+            HUB.unsubscribe(sub)
 
     def _static(self, path: str) -> None:
         root = self.app.static_dir.resolve()

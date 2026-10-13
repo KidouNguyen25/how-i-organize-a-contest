@@ -432,3 +432,7 @@ table.slist { width: 100%; border-collapse: collapse; }
 .modal-card { max-width: 30rem; padding: 1.4rem 1.6rem; }
 .modal-card h2 { font-size: 1.4rem; margin-bottom: .6rem; }
 @media (max-width: 1100px) { .code-layout { grid-template-columns: 1fr; } }
+
+/* ---------- Trạng thái cập nhật trực tiếp ---------- */
+.live-status { display: inline-block; margin-top: .8rem; padding: .15rem .7rem; border-radius: 1rem; font-size: .82rem; color: var(--text-dim); border: 1px solid var(--line); }
+.live-status.on { color: #8cc152; border-color: rgba(140, 193, 82, .45); }

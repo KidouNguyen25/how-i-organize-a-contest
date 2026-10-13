@@ -255,7 +255,7 @@ async function pageTournament(id, q) {
 }
 
 /* ================= Trang ván đấu ================= */
-const G = { m: null, positions: [], ply: 0, flip: false, fetchedAt: 0 };
+const G = { m: null, positions: [], ply: 0, flip: false, fetchedAt: 0, refresh: null };
 function paintGame() {
   const root = $('.round'); if (!root || !G.m) return;
   const m = G.m, last = G.positions.length - 1;
@@ -308,15 +308,21 @@ async function pageGame(id) {
   G.ply = 0; G.flip = !!(S.me && m.black.username === S.me.username);
   setMatch(m, true);
   const own = m.viewer_is_player;
-  const poll = every(1000, async () => {
+  let poll = null, busy = false, again = false, tick = 0;
+  const refresh = async () => {
+    if (busy) { again = true; return; }
+    busy = true;
     try {
       const nm = await api('GET', `/matches/${id}`);
       const changed = nm.move_count !== G.m.move_count || nm.status !== G.m.status || nm.revealed !== G.m.revealed || nm.placed.white !== G.m.placed.white || nm.placed.black !== G.m.placed.black;
       setMatch(nm, false);
       if (changed) paintGame();
-      if (nm.status === 'FINISHED') { clearInterval(poll); paintGame(); }
-    } catch { /* thử lại ở nhịp sau */ }
-  });
+      if (nm.status === 'FINISHED') { clearInterval(poll); G.refresh = null; paintGame(); }
+    } catch { /* thử lại ở lần sau */ } finally { busy = false; if (again) { again = false; refresh(); } }
+  };
+  G.refresh = refresh;
+  // push (SSE) cập nhật ngay; polling chỉ là lưới an toàn (5 giây khi stream đang nối, 1 giây khi mất stream)
+  poll = every(1000, () => { if (LIVE.ok && ++tick % 5) return; refresh(); });
   every(250, tickClocks);
   const wName = esc(m.white.username), bName = esc(m.black.username);
   setTimeout(paintGame, 0);
@@ -378,6 +384,7 @@ async function pageCode(tid) {
   Object.assign(C, { tid, deadline: t.coding_deadline || 0, editable: d.editable, dirty: false, used: d.compile_used, limit: d.compile_limit });
   const submitted = d.submitted;
   const waiting = t.status === 'REGISTRATION_OPEN';
+  PAGE.waiting = waiting;
   const expired = t.status === 'CODING' && !submitted && !d.editable;
   if (d.editable) every(500, codeTick);
   if (t.status === 'CODING' && !submitted && !d.submit_note) every(2000, async () => { if (!C.editable) { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.submitted || r.submit_note) route(true); } catch { /* bỏ qua */ } } });
@@ -559,6 +566,41 @@ async function pageOrgManage(id) {
         ${sched.matches.map((m) => `<tr><td class="dim">L${m.leg_no}·V${m.round_no}</td><td>${esc(m.white.username)} – ${esc(m.black.username)}</td><td>${m.status === 'FINISHED' ? SCORE[m.result] : m.status === 'RUNNING' ? '<span class="tag live">LIVE</span>' : m.status === 'PAUSED' ? '<span class="tag err">Tạm dừng</span>' : '<span class="tag info">Chờ</span>'}</td><td class="r">${m.status === 'SCHEDULED' ? '' : `<a href="#/game/${m.id}">Xem</a>`}</td></tr>`).join('') || '<tr><td class="dim">Chưa sinh lịch.</td></tr>'}</tbody></table></section></div></div></div>`;
 }
 
+/* ================= Cập nhật trực tiếp (SSE) ================= */
+const PAGE = { key: '', id: null, sub: null, waiting: false };
+const LIVE = { ok: false, es: null, timer: null };
+function setLiveStatus(ok) {
+  const el = $('#live-status'); if (!el) return;
+  el.classList.toggle('on', ok);
+  el.textContent = ok ? '● Trực tiếp' : '○ Đang kết nối lại…';
+  el.title = ok ? 'Máy chủ đẩy cập nhật ngay khi có thay đổi' : 'Mất kết nối cập nhật trực tiếp; trang vẫn tự làm mới định kỳ';
+}
+// Throttle (không debounce): một lần làm mới đang chờ thì không đặt lại giờ, tránh bị bỏ đói khi sự kiện đến liên tục.
+function softRefresh(ms = 300) { if (LIVE.timer) return; LIVE.timer = setTimeout(() => { LIVE.timer = null; route(true); }, ms); }
+function onLiveEvent(ev) {
+  const k = PAGE.key, tid = ev.tid || ev.id;
+  if (k === 'game' || (k === 'watch' && PAGE.id)) {
+    if (G.refresh && (ev.type === 'hello' || (ev.type === 'match' && ev.id === PAGE.id))) G.refresh();
+    return;
+  }
+  if (k === 'code') { if (PAGE.waiting && (ev.type === 'hello' || (ev.type === 'tournament' && ev.id === PAGE.id))) softRefresh(200); return; }
+  if (k === 'organizer' && PAGE.id === 'new') return;
+  if (k === 'login' || k === 'register' || k === 'rules') return;
+  if (ev.type === 'hello') return;
+  const slow = ev.type === 'match' && ev.move_count !== undefined; // chỉ là nước đi mới: làm mới thưa hơn
+  if (k === 'tournament') { if (tid === PAGE.id) softRefresh(slow ? 1500 : 300); return; }
+  if (k === 'organizer' && PAGE.id === 'manage') { if (tid === PAGE.sub) softRefresh(slow ? 1500 : 300); return; }
+  softRefresh(slow ? 1500 : 300); // home, danh sách giải, xem nhiều ván, bot, hồ sơ
+}
+function connectStream() {
+  if (!window.EventSource) return;
+  const es = new EventSource('/api/v1/stream');
+  LIVE.es = es;
+  es.addEventListener('hello', () => { LIVE.ok = true; setLiveStatus(true); onLiveEvent({ type: 'hello' }); });
+  es.onmessage = (e) => { LIVE.ok = true; try { onLiveEvent(JSON.parse(e.data)); } catch { /* bỏ qua */ } };
+  es.onerror = () => { LIVE.ok = false; setLiveStatus(false); }; // EventSource tự nối lại
+}
+
 /* ================= Router ================= */
 let routing = 0;
 async function route(soft = false) {
@@ -569,6 +611,7 @@ async function route(soft = false) {
   const seg = path.split('/').filter(Boolean);
   const key = seg[0] || '';
   clearTimers();
+  PAGE.key = key; PAGE.id = seg[1] || null; PAGE.sub = seg[2] || null; PAGE.waiting = false; G.refresh = null;
   renderHeader(key);
   const scroll = window.scrollY;
   if (!soft) $('#main').innerHTML = loadingHTML;
@@ -662,4 +705,4 @@ document.addEventListener('keydown', (e) => {
   if (map[e.key]) { document.querySelector(`[data-nav="${map[e.key]}"]`)?.click(); e.preventDefault(); }
 });
 window.addEventListener('hashchange', () => route());
-(async () => { await loadMe(); await route(); })();
+(async () => { await loadMe(); await route(); connectStream(); })();
