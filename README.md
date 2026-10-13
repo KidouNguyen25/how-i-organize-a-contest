@@ -15,9 +15,23 @@ Nhịp ván: sau mỗi nước đi hợp lệ engine dừng **2 giây** (`--move
 
 Kiểm thử: `python -m unittest tests.test_ott_engine -v` (luật, lịch, xếp hạng) và, khi server đang chạy, `python tests/e2e_api.py` (chơi trọn một giải 4 đội qua API; thêm `--auto-submit` để thử tự nộp khi hết giờ).
 
-**Mở cho mạng LAN.** `python -m ott serve --host 0.0.0.0 --no-register`, rồi cho phép cổng 8080 trong Windows Firewall (Private network). Luôn dùng `--no-register` khi mở LAN: runner hiện tại chạy bot không sandbox, ai có tài khoản đều chạy được mã C++ tùy ý trên máy host.
+### Sandbox Docker cho bot
 
-**Giới hạn hiện tại.** Runner bot là *dev runner*: bot chạy như process thường trên máy host, chỉ có giới hạn thời gian đồng hồ; chưa có sandbox Docker, giới hạn CPU/RAM/PID hay chặn mạng. Chỉ chạy bot tin cậy. Docker runner (xem VibeSec) chưa làm. Chưa có lease/fencing epoch nhiều runner; recovery sau restart dùng snapshot cuối. Upload bot dùng JSON (`{"source": "..."}`) thay vì multipart, và API viết bot khác `docs/web-api.yaml` (xem `/tournaments/{id}/code`, `/code/check`, `/code/submit`).
+Runner mặc định `--runner auto`: dùng Docker khi daemon chạy và image đã build, nếu không thì quay về `local` (chỉ để dev). Mỗi lần biên dịch và mỗi bot khi thi đấu chạy trong một container riêng, dùng xong xóa:
+
+- không mạng (`--network=none`), root filesystem chỉ đọc, bỏ mọi capability, `no-new-privileges`, chạy user `65534` (không phải root);
+- bot: 1 CPU, 256 MiB RAM (không swap), 64 PID, `/tmp` 16 MiB `noexec`, giới hạn file/descriptor; biên dịch: 1 CPU, 1 GiB RAM, 128 PID, timeout 15 giây;
+- binary chỉ được mount read-only; container được `docker kill` và xóa khi ván kết thúc hoặc bot lỗi.
+
+    python -m ott build-image                       # build image ott-bot-runner từ docker/Dockerfile.bot
+    python -m ott serve --runner docker             # bắt buộc dùng Docker (lỗi nếu không sẵn sàng)
+    python -m unittest tests.test_ott_sandbox -v    # test cô lập (tự bỏ qua khi không có Docker)
+
+Thời gian khởi động container không tính vào đồng hồ bot (engine đợi container chạy rồi mới gửi observation đầu). Binary của bot được biên dịch lại từ source đã lưu nếu thiếu (ví dụ khi đổi giữa `local` và `docker`). Server vẫn cần quyền dùng Docker daemon: chỉ chạy trên máy quản trị tin cậy (xem VibeSec).
+
+**Mở cho mạng LAN.** `python -m ott serve --host 0.0.0.0 --runner docker --no-register`, rồi cho phép cổng 8080 trong Windows Firewall (Private network). Với `--runner local` luôn thêm `--no-register` và chỉ cấp tài khoản cho người tin cậy: bot chạy như process thường, ai có tài khoản đều chạy được mã C++ tùy ý trên máy host.
+
+**Giới hạn hiện tại.** Chưa có lease/fencing epoch cho nhiều runner; recovery sau restart dùng snapshot cuối. Upload bot dùng JSON (`{"source": "..."}`) thay vì multipart, và API viết bot khác `docs/web-api.yaml` (xem `/tournaments/{id}/code`, `/code/check`, `/code/submit`). Docker runner chưa chạy trong container của chính server (server cần gọi `docker` trên host).
 
 Tài liệu thiết kế OTT: [PRD](docs/PRD.md), [architecture](docs/architecture.md), [UI/UX Draft](docs/UI_UX_Draft.md), [rules](docs/rules.md), [database schema](docs/database-schema.md), [VibeSec](docs/VibeSec.md), [OpenAPI](docs/web-api.yaml), [bot protocol schema](docs/bot-protocol.schema.json), [match lifecycle](docs/match-lifecycle.md).
 

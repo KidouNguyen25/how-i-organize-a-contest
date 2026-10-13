@@ -1,74 +1,72 @@
-"""Bot compile + interactive match runner.
-
-DEV RUNNER: bots run as plain host subprocesses (wall-clock limit only, no CPU/RAM/PID limits,
-no network isolation). Use only with trusted bots. A Docker runner must replace `start_bot`
-and `compile_source` before running untrusted code (see docs/VibeSec.md).
-"""
+"""Interactive match runner. Compiling and executing bots goes through `ott.sandbox`:
+host processes (dev) or Docker containers (network-less, read-only, resource-limited)."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import queue
-import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from ott import engine
+from ott.sandbox import DockerSandbox, InfraError, LocalSandbox
 from ott.store import Store
 
 LOG = logging.getLogger("ott.runner")
 MAX_LINE = 1024 * 1024
-COMPILE_TIMEOUT = 15
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 # Pause after every accepted move so spectators can follow; never charged to bot clocks.
 # Default 2 s; override with `--move-delay-ms`.
 MOVE_DELAY_S = 2.0
 
-# live per-match info for the API: {match_id: {"side": str, "since": monotonic}}
+# Active execution backend; replaced by the CLI (`--runner`).
+SANDBOX: LocalSandbox | DockerSandbox = LocalSandbox()
+_REBUILD_LOCK = threading.Lock()
+
+# live per-match info for the API: {match_id: {"side": str|None, "since": monotonic, "clocks": {...}}}
 LIVE: dict[str, dict[str, Any]] = {}
 LIVE_LOCK = threading.Lock()
 
+__all__ = ["InfraError", "SANDBOX", "LIVE", "LIVE_LOCK", "artifact_path", "compile_source", "ensure_binary", "MatchRunner"]
 
-class InfraError(Exception):
-    """Failure not attributable to a bot; the match is paused, not forfeited."""
+
+def set_sandbox(sandbox: LocalSandbox | DockerSandbox) -> None:
+    global SANDBOX
+    SANDBOX = sandbox
 
 
 def artifact_path(data_dir: Path, bot_id: str) -> Path:
-    exe = "bot.exe" if sys.platform == "win32" else "bot"
-    return data_dir / "artifacts" / bot_id / exe
+    return data_dir / "artifacts" / bot_id / SANDBOX.exe_name
 
 
 def compile_source(out: Path, source: str) -> tuple[bool, str | None]:
-    """Compile `source` (C++17) to the executable `out`. Return (ok, filtered compiler message)."""
-    compiler = shutil.which("g++") or shutil.which("c++")
-    if not compiler:
-        raise InfraError("g++ not found on PATH")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="ott-cc-") as tmp:
-        src = Path(tmp) / "bot.cpp"
-        src.write_text(source, encoding="utf-8")
-        try:
-            proc = subprocess.run(
-                [compiler, "-std=c++17", "-O2", "-o", str(out), str(src)],
-                capture_output=True, text=True, timeout=COMPILE_TIMEOUT, cwd=tmp, creationflags=CREATE_NO_WINDOW,
-            )
-        except subprocess.TimeoutExpired:
-            return False, f"Compile timed out after {COMPILE_TIMEOUT}s."
-        if proc.returncode != 0:
-            msg = proc.stderr or proc.stdout or "compile failed"
-            msg = msg.replace(str(src), "bot.cpp").replace(tmp, "")
-            msg = re.sub(r"[A-Za-z]:[\\/][^\s:]*", "<path>", msg)
-            return False, msg[:4000]
-    return True, None
+    """Compile `source` (C++17) to `out` with the active sandbox. Return (ok, filtered compiler message)."""
+    return SANDBOX.compile(out, source)
+
+
+def ensure_binary(store: Store, data_dir: Path, bot_id: str) -> Path:
+    """Binary for a submitted bot; rebuild from the stored source if it is missing
+    (e.g. after switching between the local and Docker runner)."""
+    exe = artifact_path(data_dir, bot_id)
+    if exe.exists():
+        return exe
+    with _REBUILD_LOCK:
+        if exe.exists():
+            return exe
+        bot = store.get_bot(bot_id, with_source=True)
+        if not bot or not bot["source"]:
+            raise InfraError("binary missing and no source to rebuild it")
+        ok, msg = SANDBOX.compile(exe, bot["source"])
+        if not ok:
+            raise InfraError(f"rebuild failed: {(msg or '')[:120]}")
+    return exe
 
 
 class BotProcess:
@@ -77,12 +75,16 @@ class BotProcess:
         self.q: queue.Queue[bytes | None] = queue.Queue()
         self.stderr_tail = b""
         self.overflow = False
+        self.container = f"ott-bot-{uuid.uuid4().hex[:12]}" if SANDBOX.kind == "docker" else None
         self.proc = subprocess.Popen(
-            [str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=str(exe.parent), creationflags=CREATE_NO_WINDOW,
+            SANDBOX.bot_argv(exe, self.container), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=SANDBOX.cwd(exe), creationflags=CREATE_NO_WINDOW,
         )
         threading.Thread(target=self._read_out, daemon=True).start()
         threading.Thread(target=self._read_err, daemon=True).start()
+
+    def wait_ready(self) -> None:
+        SANDBOX.wait_ready(self.container)
 
     def _read_out(self) -> None:
         try:
@@ -120,6 +122,7 @@ class BotProcess:
             self.proc.kill()
         except OSError:
             pass
+        SANDBOX.kill(self.container)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 stream.close()  # type: ignore[union-attr]
@@ -142,10 +145,7 @@ class MatchRunner:
                 info = self.store.entry_bot_paths_info(match[f"{side}_entry_id"])
                 if not info or not info["bot_id"]:
                     raise InfraError(f"{side} entry has no bot")
-                exe = artifact_path(self.data_dir, info["bot_id"])
-                if not exe.exists():
-                    raise InfraError(f"binary missing for {side} bot")
-                exes[side] = exe
+                exes[side] = ensure_binary(self.store, self.data_dir, info["bot_id"])
             state = json.loads(match["state_json"]) if match["state_json"] else engine.new_state()
             clocks = {"white": match["white_clock_ms"], "black": match["black_clock_ms"]}
             outcome = self._play(match, exes, bots, state, clocks)
@@ -171,6 +171,8 @@ class MatchRunner:
                 bots[side] = BotProcess(exes[side], side)
             except OSError:
                 return self._lose(side, "BOT_START_FAILED")
+        for side in ("white", "black"):
+            bots[side].wait_ready()  # container start-up is not charged to the bot's clock
         seq = len(state["history"])
         last_cp = time.monotonic()
         while True:
