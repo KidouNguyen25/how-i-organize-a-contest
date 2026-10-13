@@ -128,6 +128,10 @@ class BotProcess:
                 stream.close()  # type: ignore[union-attr]
             except (OSError, ValueError, AttributeError):
                 pass
+        try:
+            self.proc.wait(timeout=5)  # reap the process / docker client
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
 
 class MatchRunner:
