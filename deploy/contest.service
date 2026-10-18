@@ -1,0 +1,35 @@
+[Unit]
+Description=Competition demo private API and match dispatcher
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=contest
+Group=contest
+SupplementaryGroups=docker
+WorkingDirectory=/opt/contest
+EnvironmentFile=/etc/contest/demo.env
+Environment=TMPDIR=/srv/contest/work
+ExecStart=/opt/contest/.venv/bin/python -m ott serve --profile demo --data /srv/contest/data --runner docker --source-allowlist /etc/contest/source-allowlist.json --host 127.0.0.1 --port 8080 --secure-cookie --no-register --disable-stream
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/contest/data /srv/contest/work
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=1024
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

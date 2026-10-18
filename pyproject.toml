@@ -12,7 +12,8 @@ dependencies = []
 [project.scripts]
 oj-server = "judge.server:main"
 oj-client = "judge.client:main"
+contest = "ott.__main__:main"
 
 [tool.setuptools]
-packages = ["judge"]
+packages = ["judge", "ott"]
 

@@ -1,0 +1,35 @@
+# Dedicated Linux demo VM only. This file is never applied by the application.
+# Review at the VM console, validate with nft -c, then apply in a maintenance window.
+# Remove only this table to roll back: nft delete table inet contest_demo
+# Do not use 'flush ruleset'. Build/download approved images before this policy.
+table inet contest_demo {
+    chain input {
+        type filter hook input priority -10; policy drop;
+        iifname "lo" accept
+        ct state invalid drop
+        ct state established,related accept
+        ip protocol icmp limit rate 10/second burst 20 packets accept
+        # ICMPv6 is required for neighbor discovery and path MTU.
+        meta l4proto ipv6-icmp accept
+        # No public SSH/API/database/Docker listener is admitted.
+        # Add a reviewed private management CIDR here if console is insufficient.
+    }
+    chain forward {
+        type filter hook forward priority -10; policy drop;
+        ct state invalid drop
+        ct state established,related accept
+        # Blocks new forwarded/published container connections before Docker rules.
+        # Contest bot/compiler containers must additionally use network=none.
+    }
+    chain output {
+        type filter hook output priority -10; policy drop;
+        oifname "lo" accept
+        ct state established,related accept
+        udp dport { 53, 123, 7844 } accept
+        tcp dport { 53, 443, 7844 } accept
+        ip protocol icmp accept
+        meta l4proto ipv6-icmp accept
+        # DHCP, proxy and nonstandard DNS need explicit rules if the VM uses them.
+        # Restrict destinations to the reviewed DNS/NTP/Cloudflare endpoints.
+    }
+}

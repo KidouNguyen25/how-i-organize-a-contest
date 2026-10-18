@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -92,17 +93,20 @@ def standings(entries: list[dict[str, Any]], matches: list[dict[str, Any]]) -> l
 class Dispatcher(threading.Thread):
     """Starts SCHEDULED matches of RUNNING tournaments, at most `workers` at once and one per bot."""
 
-    def __init__(self, store: Store, data_dir: Path, workers: int = 4) -> None:
+    def __init__(self, store: Store, data_dir: Path, workers: int = 1) -> None:
         super().__init__(daemon=True, name="match-dispatcher")
         self.store, self.data_dir, self.workers = store, data_dir, workers
         self.active: dict[str, tuple[threading.Thread, str, str]] = {}
         self.stop_event = threading.Event()
-        store.recover_running()
+        self.owner = uuid.uuid4().hex
 
     def _launch(self, match: dict[str, Any]) -> None:
-        if not self.store.claim_match(match["id"]):
+        if (self.data_dir / ".maintenance").exists() or self.stop_event.is_set():
             return
-        runner = MatchRunner(self.store, self.data_dir, match["id"])
+        lease = self.store.claim_match(match["id"], self.owner, max_running=self.workers)
+        if lease is None:
+            return
+        runner = MatchRunner(self.store, self.data_dir, match["id"], lease=lease, stop_event=self.stop_event)
         thread = threading.Thread(target=runner.run, daemon=True, name=f"match-{match['id'][:8]}")
         self.active[match["id"]] = (thread, match["white_entry_id"], match["black_entry_id"])
         thread.start()
@@ -110,6 +114,10 @@ class Dispatcher(threading.Thread):
     def run(self) -> None:
         while not self.stop_event.is_set():
             try:
+                if (self.data_dir / ".maintenance").exists():
+                    self.stop_event.wait(0.4)
+                    continue
+                self.store.recover_running()
                 for mid in [m for m, (t, _, _) in self.active.items() if not t.is_alive()]:
                     del self.active[mid]
                 if len(self.active) < self.workers:
@@ -126,4 +134,13 @@ class Dispatcher(threading.Thread):
                         self._launch(m)
             except Exception:  # noqa: BLE001
                 LOG.exception("dispatcher tick failed")
-            time.sleep(0.4)
+            self.stop_event.wait(0.4)
+
+    def shutdown(self, timeout: float = 15.0) -> None:
+        """Keep the runtime data lock held until every writer has stopped."""
+        self.stop_event.set()
+        while self.is_alive():
+            self.join(timeout=1)
+        for thread, _, _ in list(self.active.values()):
+            while thread.is_alive():
+                thread.join(timeout=1)

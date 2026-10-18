@@ -5,7 +5,9 @@
 Gói `ott/` là backend Python (chỉ dùng thư viện chuẩn) gồm engine luật OTT v1, API HTTP `/api/v1`, scheduler vòng tròn hai lượt, runner bot tương tác và SQLite. Web client nằm ở [`mockup/`](mockup/README.md) và được cùng server phục vụ.
 
     python -m ott seed       # 1 organizer + 4 thí sinh; mật khẩu ở data/seed-accounts.json
-    python -m ott serve      # http://127.0.0.1:8080  (--host 0.0.0.0 để mở LAN, --port, --workers, --move-delay-ms, --no-register, --secure-cookie)
+    python -m ott serve --profile development --runner local  # chỉ phát triển ở http://127.0.0.1:8080
+
+Demo Internet dùng Docker bắt buộc, source allowlist, gateway có origin key và SQLite schema 2. Hướng dẫn code vận hành, backup/migration và cấu hình tại [`deploy/README.md`](deploy/README.md). Nộp source cuối trả HTTP 202 với receipt bền vững; hệ thống biên dịch trong hàng đợi.
 
 Luồng: organizer tạo giải (đồng hồ ván 5/10/60 phút, thời gian viết bot mặc định 60 phút) → mở đăng ký → thí sinh đăng ký → organizer bấm **bắt đầu giai đoạn viết bot** → mỗi đội viết bot C++17 ngay trên web trong thời gian đếm ngược, tối đa **10 lượt biên dịch**, bản nháp tự lưu, **nộp một lần và không thể sửa**; hết giờ hệ thống tự nộp bản nháp đã lưu (nếu biên dịch được) → organizer khóa roster, sinh lịch, bắt đầu giải → bot tự đấu.
 

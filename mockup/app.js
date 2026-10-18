@@ -385,11 +385,13 @@ async function pageCode(tid) {
   const submitted = d.submitted;
   const waiting = t.status === 'REGISTRATION_OPEN';
   PAGE.waiting = waiting;
-  const expired = t.status === 'CODING' && !submitted && !d.editable;
+  const pending = d.pending_submission;
+  const expired = t.status === 'CODING' && !submitted && !pending && !d.editable;
   if (d.editable) every(500, codeTick);
-  if (t.status === 'CODING' && !submitted && !d.submit_note) every(2000, async () => { if (!C.editable) { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.submitted || r.submit_note) route(true); } catch { /* bỏ qua */ } } });
+  if (t.status === 'CODING' && !submitted && (!d.submit_note || pending?.status === 'QUEUED')) every(10000, async () => { if (!C.editable && !document.hidden) { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.submitted || r.submit_note || JSON.stringify(r.pending_submission) !== JSON.stringify(pending)) route(true); } catch { /* bỏ qua */ } } });
   if (waiting) every(2000, async () => { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.tournament.status !== 'REGISTRATION_OPEN') route(true); } catch { /* bỏ qua */ } });
   const banner = submitted ? `<div class="notice ok">🔒 Đã nộp lúc <b>${fmtDate(d.submitted_at)}</b>. Bài nộp là bản cuối cùng và <b>không thể thay đổi</b>.</div>`
+    : pending ? `<div class="notice ${pending.status === 'REVIEW' ? 'warn' : ''}">Nguồn đã được nhận lúc <b>${fmtDate(pending.received_at)}</b> và đã khóa. ${pending.status === 'REVIEW' ? 'Cần ban tổ chức kiểm tra sự cố hạ tầng.' : 'Đang chờ biên dịch; thời gian hàng đợi không làm bài nộp trễ hạn.'}</div>`
     : d.submit_note ? `<div class="notice warn">⚠ ${esc(d.submit_note)}</div>`
     : waiting ? '<div class="notice">Giai đoạn viết bot chưa bắt đầu. Bạn có thể xem mã mẫu; khi organizer bấm bắt đầu, đồng hồ đếm ngược sẽ chạy.</div>'
     : expired ? '<div class="notice warn">⏱ Hết giờ — hệ thống đang tự nộp bản nháp đã lưu…</div>' : '';
@@ -461,8 +463,8 @@ async function submitCode() {
   const go = $('#submit-go'); go.disabled = true; go.textContent = 'Đang biên dịch & nộp…';
   clearTimeout(C.saveTimer);
   try {
-    await api('POST', `/tournaments/${C.tid}/code/submit`, { source: $('#code').value, confirm: true });
-    toast('Đã nộp bài. Bản nộp không thể thay đổi.');
+    const receipt = await api('POST', `/tournaments/${C.tid}/code/submit`, { source: $('#code').value, confirm: true });
+    toast(receipt.accepted ? 'Đã nhận và khóa nguồn. Hệ thống sẽ biên dịch trong hàng đợi.' : 'Đã nộp bài.');
     route(true);
   } catch (e) {
     $('#submit-modal').hidden = true; go.textContent = 'Nộp bài'; $('#submit-confirm').checked = false;
@@ -554,7 +556,7 @@ async function pageOrgManage(id) {
   const submitted = ent.items.filter((e) => e.submitted_at).length;
   if (t.status === 'CODING') every(500, () => { const el = $('#org-timer'); if (el) el.textContent = fmtCountdown(t.coding_deadline - nowSrv()); });
   if (['CODING', 'RUNNING', 'REGISTRATION_OPEN', 'LOCKED'].includes(t.status)) every(3000, () => { if (location.hash === `#/organizer/manage/${id}`) route(true); });
-  const entryState = (e) => e.submitted_at ? '<span class="tag ok">🔒 Đã nộp</span>' : e.submit_note ? `<span class="tag err" title="${esc(e.submit_note)}">Không nộp được</span>` : t.status === 'CODING' ? '<span class="tag warn">Đang viết</span>' : '<span class="tag">Chưa nộp</span>';
+  const entryState = (e) => e.submitted_at ? '<span class="tag ok">🔒 Đã nộp</span>' : e.submission_status === 'QUEUED' ? '<span class="tag warn">Đã nhận, chờ biên dịch</span>' : e.submission_status === 'REVIEW' ? '<span class="tag err">Cần kiểm tra hạ tầng</span>' : e.submit_note ? `<span class="tag err" title="${esc(e.submit_note)}">Không nộp được</span>` : t.status === 'CODING' ? '<span class="tag warn">Đang viết</span>' : '<span class="tag">Chưa nộp</span>';
   return `<div class="page"><div class="stack"><section class="box"><div class="box__top"><h1>Quản lý: ${esc(t.name)}</h1><span class="tag warn">ORGANIZER</span>${tag(t.status)}</div>
     <div class="stepper">${ORG_STEPS.map(([s, n], i) => `<div class="step ${t.status === 'CANCELLED' ? '' : i < idx ? 'done' : i === idx ? 'cur' : ''}"><i>${i < idx ? '✓' : i + 1}</i>${n}</div>`).join('')}</div>
     ${t.status === 'CODING' ? `<div class="row" style="padding:0 1.3rem 1rem"><span class="dim">Hạn nộp bot:</span><b class="mono" id="org-timer" style="font-size:1.4rem;color:var(--text-hi)">${fmtCountdown(t.coding_deadline - nowSrv())}</b><span class="dim">· ${submitted}/${ent.items.length} đội đã nộp</span></div>` : ''}

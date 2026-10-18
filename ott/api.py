@@ -3,30 +3,37 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import mimetypes
 import re
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from ott import engine
+from ott import runner
+from ott.adapters import get_adapter
+from ott.operations import maintenance_enabled, readiness, set_maintenance
+from ott.security import RateLimiter, RequestRejected, ServerPolicy
+from ott.sandbox import SourcePolicyError
 from ott.events import HUB
 from ott.runner import LIVE, LIVE_LOCK, InfraError, artifact_path, compile_source
-from ott.store import Store, StoreError
+from ott.store import LeaseLost, Store, StoreError
 from ott.tournament import Dispatcher, byes, round_robin, standings
 
 LOG = logging.getLogger("ott.api")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
-MAX_BODY = 400 * 1024
+MAX_BODY = 1024 * 1024
 MAX_SOURCE = 256 * 1024
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "samples" / "bot_template.cpp"
 CODING_MIN, CODING_MAX = 1, 240
@@ -41,28 +48,79 @@ class ApiError(Exception):
         self.status, self.code, self.message = status, code, message
 
 
-def make_app(store: Store, data_dir: Path, static_dir: Path, secure_cookie: bool = False, workers: int = 4,
-             open_registration: bool = True) -> "App":
-    app = App(store, data_dir, static_dir, secure_cookie, workers)
-    app.open_registration = open_registration
+def make_app(store: Store, data_dir: Path, static_dir: Path, secure_cookie: bool = False, workers: int = 1,
+             open_registration: bool = True, *, policy: ServerPolicy | None = None) -> "App":
+    app = App(store, data_dir, static_dir, secure_cookie, workers, policy or ServerPolicy())
+    app.open_registration = open_registration and not app.policy.demo
     return app
 
 
 class App:
-    def __init__(self, store: Store, data_dir: Path, static_dir: Path, secure_cookie: bool, workers: int) -> None:
+    def __init__(self, store: Store, data_dir: Path, static_dir: Path, secure_cookie: bool, workers: int,
+                 policy: ServerPolicy | None = None) -> None:
         self.store, self.data_dir, self.static_dir, self.secure_cookie = store, data_dir, static_dir, secure_cookie
+        self.policy = policy or ServerPolicy()
+        self.secure_cookie = secure_cookie or bool(self.policy.origin_keys)
+        if self.policy.demo:
+            info = runner.SANDBOX.policy_info()
+            if info["kind"] != "docker" or info["source_policy"] != "allowlist" or not info["allowed_source_count"]:
+                raise ValueError("Demo requires Docker and a nonempty approved source allowlist.")
         self.dispatcher = Dispatcher(store, data_dir, workers)
-        self.compile_slots = threading.Semaphore(2)
+        self.compile_slots = threading.BoundedSemaphore(1)
+        self.stop_event = threading.Event()
+        self.intake_lock = threading.Lock()
+        self.intakes: dict[tuple[str, int], int] = {}
+        self.watcher: threading.Thread | None = None
+        self.rate_limiter = RateLimiter()
         self.check_times: dict[int, float] = {}
         self.open_registration = True
-        self.fails: dict[str, list[float]] = {}
-        self.fail_lock = threading.Lock()
         self.routes: list[tuple[str, re.Pattern[str], Callable[..., Any], str]] = []
         self._register_routes()
 
     def start(self) -> None:
-        self.dispatcher.start()
-        threading.Thread(target=self._coding_watcher, daemon=True, name="coding-watcher").start()
+        if self.policy.dispatch_enabled:
+            self.dispatcher.start()
+        self.watcher = threading.Thread(target=self._coding_watcher, daemon=True, name="coding-watcher")
+        self.watcher.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.dispatcher.shutdown()
+        if self.watcher:
+            while self.watcher.is_alive():
+                self.watcher.join(timeout=1)
+
+    def check_source(self, source: str) -> None:
+        try:
+            runner.SANDBOX.check_source(source)
+        except SourcePolicyError as exc:
+            raise ApiError(403, "SOURCE_NOT_APPROVED", str(exc)) from None
+
+    def health_report(self) -> dict[str, Any]:
+        report = readiness(self.store, self.data_dir, runner.SANDBOX)
+        report["checks"]["serving"] = not self.stop_event.is_set()
+        report["checks"]["submission_worker"] = bool(self.watcher and self.watcher.is_alive())
+        if self.policy.dispatch_enabled:
+            report["checks"]["match_dispatcher"] = self.dispatcher.is_alive()
+        report["ready"] = all(report["checks"].values())
+        return report
+
+    @contextmanager
+    def build_slot(self):
+        if self.stop_event.is_set() or maintenance_enabled(self.data_dir):
+            raise InfraError("Maintenance is active.")
+        if not readiness(self.store, self.data_dir, runner.SANDBOX)["ready"]:
+            raise InfraError("Compiler admission is paused until runtime and storage are ready.")
+        if not self.compile_slots.acquire(blocking=False):
+            raise InfraError("Compiler is busy; retry later.")
+        try:
+            owner = uuid.uuid4().hex
+            with self.store.compile_slot(owner, limit=1, lease_seconds=180) as token:
+                yield owner, token
+        except LeaseLost as exc:
+            raise InfraError("Compiler lease unavailable or lost; retry later.") from exc
+        finally:
+            self.compile_slots.release()
 
     def template_source(self) -> str:
         try:
@@ -71,8 +129,8 @@ class App:
             return "// OTT bot template missing\nint main() { return 0; }\n"
 
     def compile_final(self, bot_id: str, source: str) -> tuple[bool, str | None]:
-        with self.compile_slots:
-            ok, msg = compile_source(artifact_path(self.data_dir, bot_id), source)
+        self.check_source(source)
+        ok, msg = compile_source(artifact_path(self.data_dir, bot_id), source)
         if not ok:
             shutil.rmtree(artifact_path(self.data_dir, bot_id).parent, ignore_errors=True)
         return ok, msg
@@ -80,44 +138,95 @@ class App:
     def check_dir(self, entry_id: str) -> Path:
         return artifact_path(self.data_dir, f"check-{entry_id}").parent
 
-    def build_final(self, entry_id: str, bot_id: str, source: str, count: bool) -> tuple[bool, str | None]:
-        """Produce the final binary: reuse the last successful check build of identical source (free),
-        otherwise compile (consuming one of the COMPILE_LIMIT attempts when `count`)."""
+    def cached_build(self, entry_id: str, source: str) -> Path | None:
         sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        entry = self.store.get_entry(entry_id)
-        cached = artifact_path(self.data_dir, f"check-{entry_id}")
-        if entry and entry["last_ok_sha"] == sha and cached.exists():
-            dest = artifact_path(self.data_dir, bot_id)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cached, dest)
+        cached = artifact_path(self.data_dir, f"check-{entry_id}-{sha}")
+        if not cached.exists():
+            return None
+        runner.SANDBOX.verify_artifact(cached, expected_source_hash=sha)
+        return cached
+
+    def build_final(self, entry_id: str, bot_id: str, source: str) -> tuple[bool, str | None]:
+        """Build an accepted receipt; quota is charged by the fenced caller."""
+        self.check_source(source)
+        sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        dest = artifact_path(self.data_dir, bot_id)
+        if dest.exists():
+            runner.SANDBOX.verify_artifact(dest, expected_source_hash=sha)
             return True, None
-        if count:
-            self.store.bump_compile(entry_id, COMPILE_LIMIT)
+        cached = self.cached_build(entry_id, source)
+        if cached is not None:
+            runner.SANDBOX.copy_artifact(cached, dest, expected_source_hash=sha)
+            return True, None
         return self.compile_final(bot_id, source)
 
-    def _coding_watcher(self) -> None:
-        """Auto-submit the saved draft of every entry that missed the coding deadline."""
-        while True:
+    def _process_submission(self, receipt: dict[str, Any]) -> None:
+        charged = False
+        with self.build_slot() as compile_lease:
+            # Another API can have completed this receipt before the slot was free.
+            current = self.store.get_pending_submission(receipt["entry_id"])
+            if not current or current["id"] != receipt["id"] or current["status"] != "QUEUED":
+                return
             try:
+                self.check_source(receipt["source"])
+                if not receipt["runtime_profile"] or json.loads(receipt["runtime_profile"]) != runner.SANDBOX.policy_info():
+                    raise InfraError("Runtime profile differs from the accepted submission.")
+                entry = self.store.get_entry(receipt["entry_id"])
+                if not entry:
+                    raise InfraError("Accepted entry is missing.")
+                dest = artifact_path(self.data_dir, receipt["bot_id"])
+                if not receipt["free_compile"] and self.cached_build(receipt["entry_id"], receipt["source"]) is None and not dest.exists():
+                    self.store.bump_compile(receipt["entry_id"], COMPILE_LIMIT, receipt_id=receipt["id"])
+                    charged = True
+                ok, message = self.build_final(receipt["entry_id"], receipt["bot_id"], receipt["source"])
+                if not ok:
+                    self.store.fail_submission(receipt["id"], message or "COMPILE_ERROR", compile_lease=compile_lease)
+                    return
+                self.store.finalize_entry(receipt["entry_id"], receipt["tournament_id"], receipt["user_id"],
+                        receipt["bot_id"], receipt["source"], compile_lease=compile_lease)
+            except (InfraError, LeaseLost, OSError, ApiError, sqlite3.Error, StoreError) as exc:
+                try:
+                    if charged:
+                        self.store.refund_compile(receipt["entry_id"], receipt_id=receipt["id"], compile_lease=compile_lease)
+                    self.store.fail_submission(receipt["id"], "INFRA: " + type(exc).__name__,
+                                               infra=True, compile_lease=compile_lease)
+                except LeaseLost:
+                    # Keep the immutable receipt for the next valid owner.
+                    LOG.warning("build receipt %s lost its lease", receipt["id"])
+
+    def _coding_watcher(self) -> None:
+        """Process durable final submissions and reserve missed-deadline drafts."""
+        while not self.stop_event.is_set():
+            try:
+                if maintenance_enabled(self.data_dir):
+                    self.stop_event.wait(1.0)
+                    continue
                 for row in self.store.expired_coding():
-                    source = (row["draft_source"] or "").strip()
-                    if not source:
-                        self.store.set_submit_note(row["eid"], "Hết giờ: chưa có mã nguồn để nộp.")
-                        continue
-                    bot_id = str(uuid.uuid4())
-                    ok, msg = self.build_final(row["eid"], bot_id, row["draft_source"], count=False)
-                    if not ok:
-                        first = (msg or "lỗi biên dịch").strip().splitlines()[0][:200]
-                        self.store.set_submit_note(row["eid"], f"Hết giờ: bản nháp không biên dịch được ({first})")
-                    elif self.store.finalize_entry(row["eid"], row["tid"], row["user_id"], bot_id, row["draft_source"]):
-                        self.store.audit(None, "code.auto_submit", row["eid"])
-                    else:
-                        shutil.rmtree(artifact_path(self.data_dir, bot_id).parent, ignore_errors=True)
-            except InfraError as exc:
-                LOG.warning("coding watcher: %s", exc)
-            except Exception:  # noqa: BLE001
-                LOG.exception("coding watcher failed")
-            time.sleep(1.0)
+                    if self.stop_event.is_set():
+                        break
+                    with self.intake_lock:
+                        if self.intakes.get((row["tid"], row["user_id"]), 0):
+                            continue
+                        if not (row["draft_source"] or "").strip():
+                            self.store.set_submit_note(row["eid"], "Hết giờ: chưa có mã nguồn để nộp.")
+                            continue
+                        try:
+                            self.check_source(row["draft_source"])
+                            self.store.reserve_submission(row["eid"], row["tid"], row["user_id"],
+                                                          row["draft_source"], time.time(), auto=True,
+                                                          runtime_profile=runner.SANDBOX.policy_info())
+                        except (ApiError, StoreError) as exc:
+                            self.store.set_submit_note(row["eid"], exc.message)
+                for receipt in self.store.queued_submissions():
+                    if self.stop_event.is_set() or maintenance_enabled(self.data_dir):
+                        break
+                    try:
+                        self._process_submission(receipt)
+                    except InfraError:
+                        break
+            except Exception:
+                LOG.exception("submission watcher failed")
+            self.stop_event.wait(1.0)
 
     # ---------- serializers ----------
     def tournament_json(self, t: dict[str, Any]) -> dict[str, Any]:
@@ -130,10 +239,12 @@ class App:
         return out
 
     def entry_json(self, e: dict[str, Any]) -> dict[str, Any]:
+        pending = self.store.get_pending_submission(e["id"])
         return {
             "id": e["id"], "tournament_id": e["tournament_id"], "username": e["username"], "status": e["status"],
             "registered_at": e["registered_at"], "bot_version_id": e["bot_submission_id"], "compile_status": e["compile_status"],
             "submitted_at": e["submitted_at"], "submit_note": e["submit_note"],
+            "submission_status": pending["status"] if pending else None,
         }
 
     def bot_json(self, b: dict[str, Any], selected: str | None = None) -> dict[str, Any]:
@@ -174,14 +285,11 @@ class App:
         out["clocks_ms"] = clocks
         out["running_side"] = running
         out["clock_seconds"] = m["clock_seconds"]
-        out["placed"] = engine.placed_counts(state) if state else {"white": 0, "black": 0}
-        revealed = bool(state and state["phase"] == "play")
-        out["revealed"] = revealed
-        out["board"] = engine.public_board(state) if state else None
-        out["placements"] = [h["action"] | {"side": h["side"]} for h in state["history"] if h["phase"] == "placement"] if revealed else None
-        if with_moves:
-            out["moves"] = state["moves_log"] if state else []
-        out["move_count"] = state["move_count"] if state else 0
+        tournament = self.get_tournament(m["tournament_id"])
+        view = get_adapter(tournament["game_id"], tournament["game_version"]).public_view(state)
+        if not with_moves:
+            view.pop("moves", None)
+        out.update(view)
         return out
 
     # ---------- auth helpers ----------
@@ -222,7 +330,7 @@ class App:
                 raise ApiError(403, "REGISTRATION_CLOSED", "Public registration is disabled on this server. Ask the organizer for an account.")
             body = ctx.json()
             username, password = body.get("username"), body.get("password")
-            if not isinstance(username, str) or not USERNAME_RE.match(username):
+            if not isinstance(username, str) or not USERNAME_RE.fullmatch(username):
                 raise ApiError(400, "BAD_REQUEST", "Username must be 3-32 chars: letters, digits, underscore.")
             if not isinstance(password, str) or not 10 <= len(password.encode("utf-8")) <= 128:
                 raise ApiError(400, "BAD_REQUEST", "Password must be 10-128 bytes.")
@@ -236,18 +344,18 @@ class App:
         def login(ctx: Ctx) -> Any:
             body = ctx.json()
             username, password = body.get("username"), body.get("password")
-            if not isinstance(username, str) or not isinstance(password, str) or len(password) > 128:
+            if not isinstance(username, str) or not USERNAME_RE.fullmatch(username) or not isinstance(password, str):
                 raise ApiError(400, "BAD_REQUEST", "username and password are required.")
-            key = f"{ctx.client_ip}|{username.lower()}"
-            with app.fail_lock:
-                recent = [t for t in app.fails.get(key, []) if time.time() - t < 300]
-                app.fails[key] = recent
-                if len(recent) >= 10:
-                    raise ApiError(429, "RATE_LIMITED", "Too many attempts. Try again later.")
+            try:
+                valid_password = 1 <= len(password.encode("utf-8")) <= 128
+            except UnicodeError:
+                valid_password = False
+            if not valid_password:
+                raise ApiError(400, "BAD_REQUEST", "Password must be valid UTF-8 and at most 128 bytes.")
+            if not app.rate_limiter.allow("login:" + username.lower(), burst=10, per_second=1/30):
+                raise ApiError(429, "RATE_LIMITED", "Too many attempts. Try again later.")
             user = app.store.verify_login(username, password)
             if not user:
-                with app.fail_lock:
-                    app.fails.setdefault(key, []).append(time.time())
                 raise ApiError(401, "INVALID_CREDENTIALS", "Wrong username or password.")
             token, csrf = app.store.create_session(user["id"])
             ctx.set_session = token
@@ -276,6 +384,23 @@ class App:
                 "running_matches": sum(t["matches_running"] for t in ts),
                 "stream_clients": HUB.clients,
             }
+
+        @r("GET", "/ops/status")
+        def operation_status(ctx: Ctx) -> Any:
+            app.require_organizer(ctx)
+            return 200, {"maintenance": maintenance_enabled(app.data_dir),
+                         "workers": app.store.worker_metrics(),
+                         "readiness": app.health_report()}
+
+        @r("POST", "/ops/maintenance")
+        def operation_maintenance(ctx: Ctx) -> Any:
+            user = app.require_organizer(ctx)
+            enabled = ctx.json().get("enabled")
+            if not isinstance(enabled, bool):
+                raise ApiError(400, "BAD_REQUEST", "enabled must be boolean.")
+            set_maintenance(app.data_dir, enabled)
+            app.store.audit(user["id"], "operations.maintenance", str(enabled))
+            return 200, {"maintenance": enabled}
 
         @r("GET", "/tournaments")
         def list_tournaments(ctx: Ctx) -> Any:
@@ -462,22 +587,29 @@ class App:
                 raise ApiError(409, "NO_ENTRY", "Register for the tournament first.")
             return t, e
 
-        def can_edit(t: dict[str, Any], e: dict[str, Any]) -> None:
+        def can_edit(t: dict[str, Any], e: dict[str, Any], received_at: float) -> None:
             if t["status"] != "CODING":
                 raise ApiError(409, "NOT_CODING", "The coding phase is not open.")
             if e["submitted_at"] is not None:
                 raise ApiError(409, "ALREADY_SUBMITTED", "The bot was already submitted and cannot be changed.")
-            if time.time() >= (t["coding_deadline"] or 0):
+            if app.store.get_pending_submission(e["id"]):
+                raise ApiError(409, "SUBMISSION_PENDING", "A final source is already accepted and processing.")
+            if received_at >= (t["coding_deadline"] or 0):
                 raise ApiError(409, "DEADLINE_PASSED", "The coding deadline has passed.")
 
         def read_source(ctx: Ctx) -> str:
             src = ctx.json().get("source")
             if not isinstance(src, str):
                 raise ApiError(400, "BAD_REQUEST", "Field 'source' (string) is required.")
-            if len(src.encode("utf-8")) > MAX_SOURCE:
+            try:
+                size = len(src.encode("utf-8"))
+            except UnicodeError:
+                raise ApiError(400, "BAD_REQUEST", "Source must be valid UTF-8.") from None
+            if size > MAX_SOURCE:
                 raise ApiError(413, "PAYLOAD_TOO_LARGE", "Source exceeds 256 KiB.")
             if "\x00" in src:
                 raise ApiError(400, "BAD_REQUEST", "Source contains NUL bytes.")
+            app.check_source(src)
             return src
 
         @r("GET", "/bot-template")
@@ -489,18 +621,21 @@ class App:
             t, e = my_coding_entry(ctx, tid)
             draft, updated = app.store.get_draft(e["id"])
             submitted = e["submitted_at"] is not None
-            editable = t["status"] == "CODING" and not submitted and time.time() < (t["coding_deadline"] or 0)
+            receipt = app.store.get_pending_submission(e["id"])
+            editable = t["status"] == "CODING" and not submitted and not receipt and time.time() < (t["coding_deadline"] or 0)
             return 200, {
                 "tournament": app.tournament_json(t), "entry_id": e["id"], "source": draft if draft is not None else app.template_source(),
                 "is_template": draft is None, "updated_at": updated, "submitted": submitted, "submitted_at": e["submitted_at"],
                 "submit_note": e["submit_note"], "editable": editable, "server_time": int(time.time()),
                 "compile_used": e["compile_count"], "compile_limit": COMPILE_LIMIT,
+                "pending_submission": ({"receipt_id": receipt["id"], "status": receipt["status"],
+                    "received_at": receipt["received_at"], "reason_code": receipt["reason_code"]} if receipt else None),
             }
 
         @r("PUT", "/tournaments/{tid}/code")
         def save_code(ctx: Ctx, tid: str) -> Any:
             t, e = my_coding_entry(ctx, tid)
-            can_edit(t, e)
+            can_edit(t, e, ctx.received_at)
             src = read_source(ctx)
             try:
                 stamp = app.store.save_draft(e["id"], src)
@@ -511,24 +646,32 @@ class App:
         @r("POST", "/tournaments/{tid}/code/check")
         def check_code(ctx: Ctx, tid: str) -> Any:
             t, e = my_coding_entry(ctx, tid)
-            can_edit(t, e)
+            can_edit(t, e, ctx.received_at)
             src = read_source(ctx)
             uid = ctx.user["id"]  # type: ignore[index]
+            if app.store.queued_submissions(limit=1):
+                raise ApiError(503, "FINAL_SUBMISSIONS_FIRST", "Final submissions are being processed; retry the check later.")
             if time.time() - app.check_times.get(uid, 0.0) < 3:
                 raise ApiError(429, "RATE_LIMITED", "Wait a few seconds between compile checks.")
-            try:
-                used = app.store.bump_compile(e["id"], COMPILE_LIMIT)
-            except StoreError as exc:
-                raise ApiError(exc.status, exc.code, exc.message) from None
-            app.check_times[uid] = time.time()
             probe = str(uuid.uuid4())
             try:
-                ok, msg = app.compile_final(probe, src)
-                if ok:
-                    keep = app.check_dir(e["id"])
-                    shutil.rmtree(keep, ignore_errors=True)
-                    shutil.copytree(artifact_path(app.data_dir, probe).parent, keep)
-                    app.store.set_last_ok(e["id"], hashlib.sha256(src.encode("utf-8")).hexdigest())
+                with app.build_slot() as compile_lease:
+                    used = app.store.bump_compile(e["id"], COMPILE_LIMIT)
+                    app.check_times[uid] = time.time()
+                    try:
+                        ok, msg = app.compile_final(probe, src)
+                        if ok:
+                            app.store.assert_compile_slot(*compile_lease)
+                            sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
+                            target = artifact_path(app.data_dir, f"check-{e['id']}-{sha}")
+                            if target.exists():
+                                runner.SANDBOX.verify_artifact(target, expected_source_hash=sha)
+                            else:
+                                runner.SANDBOX.copy_artifact(artifact_path(app.data_dir, probe), target, expected_source_hash=sha)
+                            app.store.set_last_ok(e["id"], sha, compile_lease=compile_lease)
+                    except (InfraError, LeaseLost, OSError):
+                        app.store.refund_compile(e["id"])
+                        raise
             except InfraError as exc:
                 raise ApiError(503, "COMPILER_UNAVAILABLE", str(exc)) from None
             finally:
@@ -538,29 +681,19 @@ class App:
         @r("POST", "/tournaments/{tid}/code/submit")
         def submit_code(ctx: Ctx, tid: str) -> Any:
             t, e = my_coding_entry(ctx, tid)
-            can_edit(t, e)
             if ctx.json().get("confirm") is not True:
                 raise ApiError(400, "CONFIRM_REQUIRED", "Submission is final; send confirm=true.")
             src = read_source(ctx)
             if not src.strip():
                 raise ApiError(400, "BAD_REQUEST", "Source is empty.")
-            bot_id = str(uuid.uuid4())
-            try:
-                ok, msg = app.build_final(e["id"], bot_id, src, count=True)
-            except InfraError as exc:
-                raise ApiError(503, "COMPILER_UNAVAILABLE", str(exc)) from None
-            except StoreError as exc:
-                raise ApiError(exc.status, exc.code, exc.message + " Only the last successfully compiled source can still be submitted.") from None
-            if not ok:
-                app.store.save_draft(e["id"], src)
-                raise ApiError(422, "COMPILE_ERROR", msg or "Compile failed.")
-            uid = ctx.user["id"]  # type: ignore[index]
-            if not app.store.finalize_entry(e["id"], tid, uid, bot_id, src):
-                shutil.rmtree(artifact_path(app.data_dir, bot_id).parent, ignore_errors=True)
-                raise ApiError(409, "ALREADY_SUBMITTED", "The bot was already submitted and cannot be changed.")
-            shutil.rmtree(app.check_dir(e["id"]), ignore_errors=True)
-            app.store.audit(uid, "code.submit", e["id"])
-            return 201, {"submitted_at": int(time.time()), "bot_version_id": bot_id}
+            pending = app.store.get_pending_submission(e["id"])
+            if not pending and e["submitted_at"] is None and not app.health_report()["ready"]:
+                raise ApiError(503, "NOT_READY", "Submission admission is paused; retry later.")
+            receipt = app.store.reserve_submission(e["id"], tid, ctx.user["id"], src, ctx.received_at,
+                                                  runtime_profile=runner.SANDBOX.policy_info())
+            return (200 if receipt["status"] == "READY" else 202), {"accepted": True, "receipt_id": receipt["id"], "status": receipt["status"],
+                         "received_at": receipt["received_at"], "submitted_at": receipt["received_at"] if receipt["status"] == "READY" else None,
+                         "bot_version_id": receipt["bot_id"]}
 
         @r("GET", "/bots/{bid}/source")
         def bot_source(ctx: Ctx, bid: str) -> Any:
@@ -625,21 +758,36 @@ class Ctx:
         self.set_session: str | None = None
         self.clear_session = False
         self._body: bytes | None = None
+        self.received_at = time.time()
         self.query = parse_qs(urlsplit(handler.path).query)
 
     @property
     def client_ip(self) -> str:
-        return self.handler.client_address[0]
+        return self.handler.request_ip
 
     def raw(self) -> bytes:
         if self._body is None:
+            lengths = self.handler.headers.get_all("Content-Length", [])
+            if self.handler.headers.get("Transfer-Encoding") or len(lengths) > 1:
+                raise ApiError(400, "BAD_REQUEST", "Ambiguous request framing.")
             try:
-                length = int(self.handler.headers.get("Content-Length") or 0)
+                value = lengths[0] if lengths else "0"
+                if not value.isascii() or not value.isdigit():
+                    raise ValueError
+                length = int(value)
             except ValueError:
                 raise ApiError(400, "BAD_REQUEST", "Bad Content-Length.") from None
-            if length > MAX_BODY:
+            if length > self.handler.app.policy.max_body:
                 raise ApiError(413, "PAYLOAD_TOO_LARGE", "Request body too large.")
+            if self.handler.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise ApiError(415, "UNSUPPORTED_ENCODING", "Encoded request bodies are not supported.")
+            if length and self.handler.headers.get_content_type() != "application/json":
+                raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json.")
             self._body = self.handler.rfile.read(length) if length else b""
+            if len(self._body) != length:
+                raise ApiError(400, "BAD_REQUEST", "Incomplete request body.")
+            self.received_at = time.time()
+            self.handler.body_received()
         return self._body
 
     def json(self) -> dict[str, Any]:
@@ -647,8 +795,19 @@ class Ctx:
         if not raw:
             return {}
         try:
-            data = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("Duplicate JSON field.")
+                    result[key] = value
+                return result
+
+            def invalid_constant(value):
+                raise ValueError("Non-finite JSON number.")
+
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        except (ValueError, UnicodeDecodeError, RecursionError):
             raise ApiError(400, "BAD_REQUEST", "Body must be valid JSON.") from None
         if not isinstance(data, dict):
             raise ApiError(400, "BAD_REQUEST", "Body must be a JSON object.")
@@ -658,6 +817,26 @@ class Ctx:
 class Handler(BaseHTTPRequestHandler):
     server_version = "OTTArena/1.0"
     app: App
+    timeout = 15
+
+    def handle_one_request(self) -> None:
+        # Idle timeout alone does not stop a client sending one byte at a time.
+        self.read_deadline = threading.Timer(20, self._expire_request)
+        self.read_deadline.daemon = True
+        self.read_deadline.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self.read_deadline.cancel()
+
+    def _expire_request(self) -> None:
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def body_received(self) -> None:
+        self.read_deadline.cancel()
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter
         LOG.debug("%s %s", self.address_string(), fmt % args)
@@ -667,6 +846,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Content-Security-Policy", CSP)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Request-ID", getattr(self, "request_id", uuid.uuid4().hex))
 
     def do_GET(self) -> None:  # noqa: N802
         self._dispatch("GET")
@@ -698,11 +878,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self._security_headers()
+        if status in (429, 503):
+            self.send_header("Retry-After", "5")
         if ctx and ctx.set_session:
             flags = "HttpOnly; SameSite=Lax; Path=/; Max-Age=43200" + ("; Secure" if self.app.secure_cookie else "")
             self.send_header("Set-Cookie", f"ott_session={ctx.set_session}; {flags}")
         if ctx and ctx.clear_session:
-            self.send_header("Set-Cookie", "ott_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
+            flags = "; Secure" if self.app.secure_cookie else ""
+            self.send_header("Set-Cookie", "ott_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" + flags)
         self.end_headers()
         if body and self.command != "HEAD":
             try:
@@ -711,20 +894,55 @@ class Handler(BaseHTTPRequestHandler):
                 pass  # client went away
 
     def _dispatch(self, method: str) -> None:
-        path = unquote(urlsplit(self.path).path)
-        if not path.startswith("/api/v1/"):
-            if method != "GET":
-                self._send(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "Method not allowed."}})
-                return
-            self._static(path)
-            return
-        sub = path[len("/api/v1"):]
-        if sub == "/stream" and method == "GET":
-            self._stream()
-            return
-        user, token = self._session()
-        ctx = Ctx(self, user, token)
+        self.request_id = uuid.uuid4().hex
+        self.request_ip = self.client_address[0]
+        ctx = None
+        intake_key = None
         try:
+            proxied = self.app.policy.authenticate(self.headers, method)
+            self.request_ip = self.app.policy.client_ip(self.headers, self.client_address[0], proxied)
+            if len(self.path) > 8192:
+                raise ApiError(414, "URI_TOO_LONG", "Request target is too long.")
+            if not self.app.rate_limiter.allow("request:" + self.request_ip, burst=240, per_second=60):
+                raise ApiError(429, "RATE_LIMITED", "Too many requests.")
+            path = unquote(urlsplit(self.path).path)
+            if method == "GET":
+                self.body_received()
+            if path == "/healthz" and method == "GET":
+                self._send(200, {"alive": True})
+                return
+            if path == "/readyz" and method == "GET":
+                report = self.app.health_report()
+                # Public checks expose no runtime metadata.
+                self._send(200 if report["ready"] else 503, {"ready": report["ready"], "checks": report["checks"]})
+                return
+            if not path.startswith("/api/v1/"):
+                if method != "GET":
+                    raise ApiError(405, "METHOD_NOT_ALLOWED", "Method not allowed.")
+                self._static(path)
+                return
+            sub = path[len("/api/v1"):]
+            if sub in ("/auth/login", "/auth/register"):
+                if not self.app.rate_limiter.allow("auth:" + self.request_ip, burst=30, per_second=1):
+                    raise ApiError(429, "RATE_LIMITED", "Too many authentication requests.")
+            if method != "GET" and maintenance_enabled(self.app.data_dir) and sub not in (
+                    "/ops/maintenance", "/auth/login", "/auth/logout"):
+                raise ApiError(503, "MAINTENANCE", "Maintenance is active; retry later.")
+            user, token = self._session()
+            intake_match = re.fullmatch(r"/tournaments/([0-9a-f-]{36})/code(?:/submit)?", sub)
+            final_or_draft = (method == "POST" and sub.endswith("/code/submit")) or (method == "PUT" and sub.endswith("/code"))
+            if final_or_draft and user and intake_match:
+                intake_key = (intake_match.group(1), user["id"])
+                with self.app.intake_lock:
+                    self.app.intakes[intake_key] = self.app.intakes.get(intake_key, 0) + 1
+            ctx = Ctx(self, user, token)
+            if method != "GET":
+                ctx.json()
+            if sub == "/stream" and method == "GET":
+                if not self.app.policy.allow_stream:
+                    raise ApiError(404, "STREAM_DISABLED", "Use polling for this deployment.")
+                self._stream()
+                return
             matched = False
             for m, regex, fn, kind in self.app.routes:
                 hit = regex.match(sub)
@@ -734,10 +952,7 @@ class Handler(BaseHTTPRequestHandler):
                 if m != method:
                     continue
                 if kind == "mut" and sub not in ("/auth/login", "/auth/register"):
-                    origin = self.headers.get("Origin")
-                    if origin and urlsplit(origin).netloc != self.headers.get("Host"):
-                        raise ApiError(403, "FORBIDDEN", "Cross-origin request rejected.")
-                    if not user or self.headers.get("X-CSRF-Token") != user["csrf_token"]:
+                    if not user or not hmac.compare_digest(self.headers.get("X-CSRF-Token", "").encode("utf-8"), user["csrf_token"].encode("utf-8")):
                         if not user:
                             raise ApiError(401, "AUTH_REQUIRED", "Log in first.")
                         raise ApiError(403, "CSRF", "Missing or invalid CSRF token.")
@@ -745,13 +960,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(status, payload, ctx)
                 return
             raise ApiError(405 if matched else 404, "METHOD_NOT_ALLOWED" if matched else "NOT_FOUND", "No such endpoint.")
-        except ApiError as exc:
+        except (ApiError, RequestRejected) as exc:
             self._send(exc.status, {"error": {"code": exc.code, "message": exc.message}}, ctx)
         except StoreError as exc:
             self._send(exc.status, {"error": {"code": exc.code, "message": exc.message}}, ctx)
+        except sqlite3.Error:
+            self._send(503, {"error": {"code": "DATABASE_UNAVAILABLE", "message": "Storage is unavailable; retry later."}}, ctx)
+        except (socket.timeout, TimeoutError):
+            self._send(408, {"error": {"code": "REQUEST_TIMEOUT", "message": "Request timed out."}}, ctx)
         except Exception:  # noqa: BLE001
             LOG.exception("unhandled error for %s %s", method, path)
             self._send(500, {"error": {"code": "INTERNAL", "message": "Internal server error."}}, ctx)
+        finally:
+            if intake_key:
+                with self.app.intake_lock:
+                    remaining = self.app.intakes[intake_key] - 1
+                    if remaining:
+                        self.app.intakes[intake_key] = remaining
+                    else:
+                        self.app.intakes.pop(intake_key, None)
 
     def _stream(self) -> None:
         """Server-Sent Events: push change notifications so every client updates immediately."""
@@ -771,7 +998,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"retry: 1000\n\n")
             self.wfile.write(b'event: hello\ndata: {"type":"hello"}\n\n')
             self.wfile.flush()
-            while not sub.closed:
+            while not sub.closed and not self.app.stop_event.is_set():
                 batch = sub.get_batch(15.0)
                 if batch is None:
                     self.wfile.write(b": ping\n\n")  # keep-alive through idle proxies / NAT
@@ -806,9 +1033,46 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = False
+    block_on_close = True
+    request_queue_size = 32
+
+    def __init__(self, address, handler, app: App):
+        self.app = app
+        self.slots = threading.BoundedSemaphore(app.policy.connection_limit)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 5\r\nContent-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def server_close(self):
+        self.app.stop()
+        super().server_close()
+
+
 def serve(app: App, host: str, port: int) -> ThreadingHTTPServer:
-    Handler.app = app
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
+    if host not in ("127.0.0.1", "localhost"):
+        raise ValueError("Private API must bind IPv4 loopback; use the authenticated gateway.")
+    handler = type("ContestHandler", (Handler,), {"app": app})
+    server = BoundedHTTPServer((host, port), handler, app)
     app.start()
     return server
