@@ -1,10 +1,18 @@
-# Image used by the OTT runner to compile bots and to run them (one throw-away container each).
-# Build:  python -m ott build-image    (or: docker build -f docker/Dockerfile.bot -t ott-bot-runner docker)
-FROM debian:bookworm-slim
+# Release builds supply an approved debian:bookworm-slim@sha256:... as BASE_IMAGE.
+# The runner resolves locally built images to immutable image IDs before use.
+# Build runtime separately with --target runtime; the default remains compiler.
+ARG BASE_IMAGE=debian:bookworm-slim
+FROM ${BASE_IMAGE} AS base
+WORKDIR /tmp
 
+FROM base AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+USER 65534:65534
+
+FROM base AS compiler
 RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /tmp
 USER 65534:65534

@@ -1,40 +1,384 @@
-"""Where bots are compiled and executed: plain host processes (dev) or Docker containers (sandbox)."""
+"""Compile and run bots with bounded I/O and verified immutable artifacts."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import queue
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
+from functools import wraps
 from pathlib import Path
+from typing import Any, Iterable
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 COMPILE_TIMEOUT = 15
+COMPILE_OUTER_TIMEOUT = 60
 IMAGE = "ott-bot-runner"
 RUN_MEMORY_MB = 256
 RUN_PIDS = 64
 COMPILE_MEMORY_MB = 1024
 COMPILE_PIDS = 128
+MAX_SOURCE_BYTES = 256 * 1024
+MAX_BINARY_BYTES = 64 * 1024 * 1024
+MAX_COMPILER_OUTPUT_BYTES = 1024 * 1024
+MAX_DIAGNOSTIC_BYTES = 4096
+COMPILE_FLAGS = ("-std=c++17", "-O2", "-pipe")
+
+# Only this fixed program is passed to a shell. No source, path or user input is interpolated.
+_COMPILE_PROGRAM = (
+    "timeout --signal=KILL 15s g++ -std=c++17 -O2 -pipe -o /build/bot /src/bot.cpp 1>&2; "
+    "status=$?; if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi; "
+    "test -f /build/bot && test ! -L /build/bot || exit 126; "
+    "exec cat /build/bot"
+)
 
 
 class InfraError(Exception):
-    """Failure not attributable to a bot; the match is paused, not forfeited."""
+    """Failure not attributable to a bot; pause the match instead of forfeiting it."""
+
+
+class SourcePolicyError(ValueError):
+    """The submitted source is outside the configured admission policy."""
+
+
+def _filesystem_errors(method: Any) -> Any:
+    @wraps(method)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return method(*args, **kwargs)
+        except OSError as exc:
+            raise InfraError(f"artifact/build filesystem unavailable: {exc.strerror or type(exc).__name__}") from None
+    return wrapped
 
 
 def _clean_compiler_output(msg: str, *hidden: str) -> str:
-    for h in hidden:
-        msg = msg.replace(h, "")
-    return re.sub(r"[A-Za-z]:[\\/][^\s:]*", "<path>", msg)[:4000]
+    for item in hidden:
+        msg = msg.replace(item, "")
+    msg = re.sub(r"[A-Za-z]:[\\/][^\s:]*", "<path>", msg)
+    return msg.encode("utf-8", errors="replace")[:MAX_DIAGNOSTIC_BYTES].decode("utf-8", errors="replace")
 
 
-class LocalSandbox:
-    """DEV ONLY: bots run as ordinary host processes. No CPU/RAM/PID limits, no network isolation."""
+def _checked_path(path: Path) -> Path:
+    """Reject symlinks before resolving any existing path component."""
+    path = Path(os.path.abspath(path))
+    for item in (path, *path.parents):
+        try:
+            mode = item.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode) or (hasattr(item, "is_junction") and item.is_junction()):
+            raise InfraError("artifact paths must not contain links or junctions")
+    return path
+
+
+def _manifest_path(exe: Path) -> Path:
+    return exe.with_name(exe.name + ".manifest.json")
+
+
+def _hash_binary(exe: Path, *, linux: bool) -> tuple[str, int]:
+    exe = _checked_path(exe)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(exe, flags)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_BINARY_BYTES:
+                raise InfraError("artifact must be a nonempty regular file no larger than 64 MiB")
+            header = stream.read(64)
+            if linux:
+                if (len(header) < 52 or header[:4] != b"\x7fELF" or header[4] not in (1, 2)
+                        or header[5] not in (1, 2) or header[6] != 1
+                        or (header[4] == 2 and len(header) < 64)):
+                    raise InfraError("artifact is not a valid ELF executable")
+                byteorder = "little" if header[5] == 1 else "big"
+                if int.from_bytes(header[16:18], byteorder) not in (2, 3):
+                    raise InfraError("ELF artifact must be an executable or position-independent executable")
+            if not linux and header[:2] != b"MZ":
+                raise InfraError("local Windows artifact is not an executable")
+            digest = hashlib.sha256(header)
+            count = len(header)
+            while chunk := stream.read(65536):
+                count += len(chunk)
+                if count > MAX_BINARY_BYTES:
+                    raise InfraError("artifact exceeds 64 MiB")
+                digest.update(chunk)
+            if count != info.st_size:
+                raise InfraError("artifact changed during verification")
+            return digest.hexdigest(), count
+    except OSError as exc:
+        raise InfraError(f"cannot read artifact: {exc.strerror or type(exc).__name__}") from None
+
+
+def _publish_artifact(source: Path, dest: Path, manifest: dict[str, Any]) -> None:
+    """Publish binary first and manifest last; readers reject incomplete pairs."""
+    dest = _checked_path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _checked_path(dest.parent)
+    manifest_dest = _checked_path(_manifest_path(dest))
+    binary_tmp: Path | None = None
+    manifest_tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".artifact-", dir=dest.parent, delete=False) as output:
+            binary_tmp = Path(output.name)
+            with source.open("rb") as incoming:
+                count = 0
+                digest = hashlib.sha256()
+                while chunk := incoming.read(65536):
+                    count += len(chunk)
+                    if count > MAX_BINARY_BYTES:
+                        raise InfraError("artifact exceeds 64 MiB")
+                    digest.update(chunk)
+                    output.write(chunk)
+            if count != manifest["binary_size"] or digest.hexdigest() != manifest["binary_sha256"]:
+                raise InfraError("artifact changed while publishing")
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(binary_tmp, 0o555)
+        with tempfile.NamedTemporaryFile(prefix=".manifest-", dir=dest.parent, delete=False, mode="w", encoding="utf-8") as output:
+            manifest_tmp = Path(output.name)
+            json.dump(manifest, output, sort_keys=True, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        # Windows read-only attributes prevent ordinary cache cleanup; ACLs protect its parent.
+        os.chmod(manifest_tmp, 0o600 if os.name == "nt" else 0o444)
+        try:
+            # Atomic creation without replacing an existing immutable binary.
+            os.link(binary_tmp, dest)
+        except FileExistsError:
+            raise InfraError("artifact destination already exists; create a new immutable version") from None
+        if os.name == "nt":
+            os.chmod(binary_tmp, 0o755)
+        binary_tmp.unlink()
+        binary_tmp = None
+        os.replace(manifest_tmp, manifest_dest)
+        manifest_tmp = None
+        if os.name == "posix":
+            directory = os.open(dest.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    except OSError as exc:
+        raise InfraError(f"cannot publish artifact: {exc.strerror or type(exc).__name__}") from None
+    finally:
+        for item in (binary_tmp, manifest_tmp):
+            if item is not None:
+                if os.name == "nt" and item.exists():
+                    os.chmod(item, 0o600)
+                item.unlink(missing_ok=True)
+
+
+def _bounded_process(args: list[str], *, binary_output: Any = None, cwd: str | None = None,
+                     kill_container: Any = None, timeout: float = COMPILE_OUTER_TIMEOUT) -> tuple[int, str, str | None]:
+    """Drain pipes in bounded chunks; compiler diagnostics never accumulate unboundedly."""
+    try:
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                cwd=cwd, creationflags=CREATE_NO_WINDOW, start_new_session=os.name == "posix")
+    except OSError as exc:
+        raise InfraError(f"compiler process unavailable: {exc.strerror or type(exc).__name__}") from None
+    chunks: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=8)
+    stopped = threading.Event()
+
+    def read_pipe(label: str, pipe: Any) -> None:
+        try:
+            while not stopped.is_set():
+                data = pipe.read1(65536)
+                if not data:
+                    break
+                while not stopped.is_set():
+                    try:
+                        chunks.put((label, data), timeout=0.1)
+                        break
+                    except queue.Full:
+                        pass
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+            while not stopped.is_set():
+                try:
+                    chunks.put((label, None), timeout=0.1)
+                    break
+                except queue.Full:
+                    pass
+
+    threads = [threading.Thread(target=read_pipe, args=(label, pipe), daemon=True)
+               for label, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr))]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    diagnostic = bytearray()
+    diagnostic_size = binary_size = finished = 0
+    failure = None
+    try:
+        while finished < 2:
+            if time.monotonic() >= deadline:
+                failure = "outer timeout"
+                break
+            try:
+                label, data = chunks.get(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
+            except queue.Empty:
+                continue
+            if data is None:
+                finished += 1
+            elif label == "stdout" and binary_output is not None:
+                binary_size += len(data)
+                if binary_size > MAX_BINARY_BYTES:
+                    failure = "binary output exceeds 64 MiB"
+                    break
+                binary_output.write(data)
+            else:
+                diagnostic_size += len(data)
+                diagnostic.extend(data[:max(0, MAX_DIAGNOSTIC_BYTES - len(diagnostic))])
+                if diagnostic_size > MAX_COMPILER_OUTPUT_BYTES:
+                    failure = "compiler output exceeds 1 MiB"
+                    break
+        if failure is None:
+            try:
+                code = proc.wait(timeout=max(0.001, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                failure = "outer timeout"
+        if failure is not None:
+            if kill_container is not None:
+                kill_container()
+            try:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            code = -1
+        return code, diagnostic.decode("utf-8", errors="replace"), failure
+    finally:
+        stopped.set()
+        if proc.poll() is None:
+            if kill_container is not None:
+                kill_container()
+            try:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        for thread in threads:
+            thread.join(timeout=1)
+
+
+class _ArtifactPolicy:
+    kind: str
+
+    def set_allowed_source_hashes(self, hashes: Iterable[str] | None) -> None:
+        if hashes is None:
+            self.allowed_source_hashes: frozenset[str] | None = None
+            return
+        values = frozenset(value.lower() for value in hashes)
+        if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in values):
+            raise ValueError("source allowlist requires SHA-256 hex digests")
+        self.allowed_source_hashes = values
+
+    def source_allowed(self, source: str) -> bool:
+        try:
+            self.check_source(source)
+            return True
+        except SourcePolicyError:
+            return False
+
+    def check_source(self, source: str) -> None:
+        if not isinstance(source, str):
+            raise SourcePolicyError("source must be UTF-8 text")
+        try:
+            raw = source.encode("utf-8")
+        except UnicodeError:
+            raise SourcePolicyError("source must be valid UTF-8 text") from None
+        if len(raw) > MAX_SOURCE_BYTES:
+            raise SourcePolicyError("source exceeds 256 KiB")
+        if b"\x00" in raw:
+            raise SourcePolicyError("source must not contain NUL bytes")
+        if self.allowed_source_hashes is not None and hashlib.sha256(raw).hexdigest() not in self.allowed_source_hashes:
+            raise SourcePolicyError("source hash is not approved for this demo")
+
+    def policy_info(self) -> dict[str, Any]:
+        return {"kind": self.kind, "source_policy": "allowlist" if self.allowed_source_hashes is not None else "unrestricted",
+                "allowed_source_count": len(self.allowed_source_hashes) if self.allowed_source_hashes is not None else None,
+                "compiler_image_id": getattr(self, "compiler_image_id", None),
+                "runtime_image_id": getattr(self, "runtime_image_id", None)}
+
+    @_filesystem_errors
+    def verify_artifact(self, exe: Path, expected_source_hash: str | None = None) -> dict[str, Any]:
+        exe = _checked_path(exe)
+        path = _checked_path(_manifest_path(exe))
+        try:
+            if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_size > 65536:
+                raise InfraError("invalid artifact manifest")
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            raise InfraError("artifact manifest missing or invalid; rebuild as a new approved version") from None
+        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or manifest.get("sandbox_kind") != self.kind:
+            raise InfraError("artifact manifest version or execution mode mismatch")
+        source_hash = manifest.get("source_sha256", "")
+        if not isinstance(source_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", source_hash):
+            raise InfraError("artifact source hash missing or invalid")
+        if expected_source_hash is not None and source_hash != expected_source_hash:
+            raise InfraError("artifact does not match the selected source")
+        if self.allowed_source_hashes is not None and source_hash not in self.allowed_source_hashes:
+            raise InfraError("artifact source is outside the approved demo allowlist")
+        if manifest.get("compile_flags") != list(COMPILE_FLAGS):
+            raise InfraError("artifact compiler flags mismatch")
+        if self.kind == "docker":
+            self._ensure_images()
+            if (manifest.get("compiler_image_id") != self.compiler_image_id
+                    or manifest.get("runtime_image_id") != self.runtime_image_id):
+                raise InfraError("artifact image mismatch; create a new approved build")
+        binary_hash, binary_size = _hash_binary(exe, linux=self.kind == "docker" or os.name == "posix")
+        if manifest.get("binary_sha256") != binary_hash or manifest.get("binary_size") != binary_size:
+            raise InfraError("artifact integrity check failed")
+        return manifest
+
+    @_filesystem_errors
+    def copy_artifact(self, source: Path, dest: Path, expected_source_hash: str | None = None) -> dict[str, Any]:
+        manifest = self.verify_artifact(source, expected_source_hash)
+        _publish_artifact(_checked_path(source), dest, manifest)
+        return self.verify_artifact(dest, expected_source_hash)
+
+    def _manifest(self, exe: Path, source: str) -> dict[str, Any]:
+        digest, size = _hash_binary(exe, linux=self.kind == "docker" or os.name == "posix")
+        return {"schema_version": 1, "sandbox_kind": self.kind,
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "binary_sha256": digest, "binary_size": size, "compile_flags": list(COMPILE_FLAGS),
+                "compiler_image_id": getattr(self, "compiler_image_id", None),
+                "runtime_image_id": getattr(self, "runtime_image_id", None)}
+
+
+class LocalSandbox(_ArtifactPolicy):
+    """Explicit development mode; ordinary host processes have no security isolation."""
 
     kind = "local"
+
+    def __init__(self, *, allowed_source_hashes: Iterable[str] | None = None) -> None:
+        self.set_allowed_source_hashes(allowed_source_hashes)
 
     @property
     def exe_name(self) -> str:
@@ -42,30 +386,31 @@ class LocalSandbox:
 
     def available(self) -> tuple[bool, str]:
         ok = bool(shutil.which("g++") or shutil.which("c++"))
-        return ok, "g++ found" if ok else "g++ not found on PATH"
+        return ok, "g++ found (unisolated development mode)" if ok else "g++ not found on PATH"
 
+    @_filesystem_errors
     def compile(self, out: Path, source: str) -> tuple[bool, str | None]:
+        self.check_source(source)
         compiler = shutil.which("g++") or shutil.which("c++")
         if not compiler:
             raise InfraError("g++ not found on PATH")
-        out.parent.mkdir(parents=True, exist_ok=True)
+        _checked_path(out)
         with tempfile.TemporaryDirectory(prefix="ott-cc-") as tmp:
-            src = Path(tmp) / "bot.cpp"
-            src.write_text(source, encoding="utf-8")
-            try:
-                proc = subprocess.run(
-                    [compiler, "-std=c++17", "-O2", "-o", str(out), str(src)],
-                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT, cwd=tmp, creationflags=CREATE_NO_WINDOW,
-                )
-            except subprocess.TimeoutExpired:
-                return False, f"Compile timed out after {COMPILE_TIMEOUT}s."
-            if proc.returncode != 0:
-                msg = proc.stderr or proc.stdout or "compile failed"
-                return False, _clean_compiler_output(msg.replace(str(src), "bot.cpp"), tmp)
+            src, built = Path(tmp) / "bot.cpp", Path(tmp) / self.exe_name
+            src.write_bytes(source.encode("utf-8"))
+            code, diagnostic, failure = _bounded_process(
+                [compiler, *COMPILE_FLAGS, "-o", str(built), str(src)], cwd=tmp, timeout=COMPILE_TIMEOUT)
+            if failure is not None:
+                return False, failure
+            if code != 0:
+                return False, _clean_compiler_output(diagnostic or "compile failed", str(src), tmp)
+            self.check_source(source)
+            _publish_artifact(built, out, self._manifest(built, source))
         return True, None
 
     def bot_argv(self, exe: Path, container: str | None = None) -> list[str]:
-        return [str(exe)]
+        self.verify_artifact(exe)
+        return [str(_checked_path(exe))]
 
     def cwd(self, exe: Path) -> str | None:
         return str(exe.parent)
@@ -77,125 +422,170 @@ class LocalSandbox:
         return None
 
 
-class DockerSandbox:
-    """Every compile and every bot process runs in its own throw-away container.
-
-    Containers: no network, read-only root FS, all capabilities dropped, no-new-privileges, non-root user,
-    1 CPU, 256 MiB RAM (swap disabled), 64 PIDs, small noexec tmpfs, file/descriptor ulimits.
-    """
+class DockerSandbox(_ArtifactPolicy):
+    """Dedicated compile/runtime containers; images are pinned to inspected local IDs."""
 
     kind = "docker"
-    exe_name = "bot"  # always a Linux binary, whatever the host OS
+    exe_name = "bot"
 
-    def __init__(self, image: str = IMAGE) -> None:
+    def __init__(self, image: str = IMAGE, *, runtime_image: str | None = None,
+                 allowed_source_hashes: Iterable[str] | None = None) -> None:
         self.image = image
+        self.runtime_image = runtime_image or image
+        self.compiler_image_id: str | None = None
+        self.runtime_image_id: str | None = None
+        self._image_lock = threading.Lock()
+        self.set_allowed_source_hashes(allowed_source_hashes)
 
-    # ---- availability ----
+    def _inspect_image(self, reference: str) -> str:
+        try:
+            result = subprocess.run(["docker", "image", "inspect", "--format", "{{json .}}", reference],
+                                    capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired):
+            raise InfraError("cannot inspect local Docker image") from None
+        if result.returncode != 0:
+            raise InfraError(f"required local image '{reference}' unavailable; images are never pulled by the runner")
+        try:
+            info = json.loads(result.stdout)
+            image_id = info["Id"]
+            if info.get("Os") != "linux" or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                raise ValueError("unsupported image")
+            return image_id
+        except (ValueError, KeyError, TypeError):
+            raise InfraError("Docker image inspection returned an invalid Linux image identity") from None
+
+    def _ensure_images(self) -> None:
+        with self._image_lock:
+            if self.compiler_image_id is None:
+                self.compiler_image_id = self._inspect_image(self.image)
+            if self.runtime_image_id is None:
+                self.runtime_image_id = (self.compiler_image_id if self.runtime_image == self.image
+                                         else self._inspect_image(self.runtime_image))
+
     def available(self) -> tuple[bool, str]:
-        docker = shutil.which("docker")
-        if not docker:
+        if not shutil.which("docker"):
             return False, "docker CLI not found on PATH"
         try:
-            info = subprocess.run([docker, "info", "--format", "{{.ServerVersion}}"], capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW)
-        except (OSError, subprocess.TimeoutExpired):
-            return False, "docker daemon not reachable"
-        if info.returncode != 0:
-            return False, "docker daemon not reachable (is Docker running?)"
-        img = subprocess.run([docker, "image", "inspect", self.image], capture_output=True, timeout=20, creationflags=CREATE_NO_WINDOW)
-        if img.returncode != 0:
-            return False, f"image '{self.image}' not built (run: python -m ott build-image)"
-        return True, f"docker {info.stdout.strip()} / image {self.image}"
+            result = subprocess.run(["docker", "info", "--format", "{{.OSType}}"], capture_output=True,
+                                    text=True, timeout=20, creationflags=CREATE_NO_WINDOW)
+            if result.returncode != 0 or result.stdout.strip() != "linux":
+                return False, "Linux Docker daemon unavailable"
+            self._ensure_images()
+        except (OSError, subprocess.TimeoutExpired, InfraError) as exc:
+            return False, str(exc) if isinstance(exc, InfraError) else "docker daemon not reachable"
+        return True, f"Linux Docker / compiler {self.compiler_image_id} / runtime {self.runtime_image_id}"
 
-    # ---- container flags ----
-    def run_args(self, name: str, *, memory_mb: int, pids: int, tmp_mb: int, tmp_exec: bool, user: str = "65534:65534") -> list[str]:
-        return [
-            "docker", "run", "--rm", "--name", name,
-            "--network=none",
-            f"--memory={memory_mb}m", f"--memory-swap={memory_mb}m",
-            "--cpus=1", f"--pids-limit={pids}",
-            "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-            f"--user={user}",
-            f"--tmpfs=/tmp:rw,{'exec' if tmp_exec else 'noexec'},nosuid,nodev,size={tmp_mb}m",
-            "--ulimit=nofile=64:64", "--ulimit=fsize=67108864:67108864", "--ulimit=core=0",
-            "--env=HOME=/tmp",
-        ]
+    def run_args(self, name: str, *, memory_mb: int, pids: int, tmp_mb: int,
+                 tmp_exec: bool, user: str = "65534:65534") -> list[str]:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+            raise InfraError("invalid container name")
+        return ["docker", "run", "--rm", "--pull=never", "--name", name, "--network=none",
+                f"--memory={memory_mb}m", f"--memory-swap={memory_mb}m", "--cpus=1", f"--pids-limit={pids}",
+                "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", f"--user={user}",
+                f"--tmpfs=/tmp:rw,{'exec' if tmp_exec else 'noexec'},nosuid,nodev,size={tmp_mb}m",
+                "--ulimit=nofile=64:64", "--ulimit=fsize=67108864:67108864", "--ulimit=core=0", "--env=HOME=/tmp"]
 
-    # ---- compile ----
+    @_filesystem_errors
     def compile(self, out: Path, source: str) -> tuple[bool, str | None]:
+        self.check_source(source)
+        self._ensure_images()
+        _checked_path(out)
         name = f"ott-cc-{uuid.uuid4().hex[:12]}"
-        out.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="ott-cc-") as tmp:
-            src_dir, build_dir = Path(tmp) / "src", Path(tmp) / "build"
-            src_dir.mkdir()
-            build_dir.mkdir()
-            (src_dir / "bot.cpp").write_text(source, encoding="utf-8")
-            if os.name == "posix":  # container runs as nobody; the build dir must be writable by it
-                os.chmod(build_dir, 0o777)
+            src_dir, built = Path(tmp) / "src", Path(tmp) / "bot"
+            src_dir.mkdir(mode=0o755)
+            src = src_dir / "bot.cpp"
+            src.write_bytes(source.encode("utf-8"))
+            os.chmod(src, 0o444)
+            src_dir = _checked_path(src_dir)
+            if "," in str(src_dir):
+                raise InfraError("Docker mount path must not contain a comma")
             args = self.run_args(name, memory_mb=COMPILE_MEMORY_MB, pids=COMPILE_PIDS, tmp_mb=64, tmp_exec=True)
-            args += [
-                "--mount", f"type=bind,src={src_dir},dst=/src,readonly",
-                "--mount", f"type=bind,src={build_dir},dst=/build",
-                self.image,
-                "timeout", str(COMPILE_TIMEOUT), "g++", "-std=c++17", "-O2", "-pipe", "-o", "/build/bot", "/src/bot.cpp",
-            ]
-            try:
-                proc = subprocess.run(args, capture_output=True, text=True, timeout=COMPILE_TIMEOUT + 45, creationflags=CREATE_NO_WINDOW)
-            except subprocess.TimeoutExpired:
-                self.kill(name)
+            args += ["--tmpfs=/build:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=65534,gid=65534",
+                     "--mount", f"type=bind,src={src_dir},dst=/src,readonly",
+                     self.compiler_image_id, "sh", "-c", _COMPILE_PROGRAM]
+            with built.open("wb") as binary:
+                code, diagnostic, failure = _bounded_process(args, binary_output=binary,
+                                                            kill_container=lambda: self.kill(name))
+            if failure == "outer timeout":
+                raise InfraError("Docker build exceeded the 60s infrastructure deadline")
+            if failure is not None:
+                return False, failure
+            if code == 124:
                 return False, f"Compile timed out after {COMPILE_TIMEOUT}s."
-            except OSError as exc:
-                raise InfraError(f"docker unavailable: {exc}") from None
-            if proc.returncode == 124:
-                return False, f"Compile timed out after {COMPILE_TIMEOUT}s."
-            if proc.returncode != 0:
-                text = proc.stderr or proc.stdout or "compile failed"
-                if "docker:" in text.lower() and ("daemon" in text.lower() or "error response" in text.lower() or "pull access" in text.lower()):
-                    raise InfraError(text.strip().splitlines()[0][:200])
-                return False, _clean_compiler_output(text.replace("/src/bot.cpp", "bot.cpp"))
-            built = build_dir / "bot"
-            if not built.exists():
-                raise InfraError("compiler produced no binary")
-            shutil.copy2(built, out)
-            os.chmod(out, 0o755)
+            if code == 137:
+                return False, "Compiler exceeded its time or resource limit."
+            if code in (125, 126, 127):
+                raise InfraError("Docker build environment failed; inspect restricted operator logs")
+            if code != 0:
+                return False, _clean_compiler_output(diagnostic or "compile failed", "/src/", tmp)
+            self.check_source(source)
+            _publish_artifact(built, out, self._manifest(built, source))
         return True, None
 
-    # ---- run ----
     def bot_argv(self, exe: Path, container: str | None = None) -> list[str]:
+        self.verify_artifact(exe)
+        exe = _checked_path(exe)
+        if "," in str(exe):
+            raise InfraError("Docker mount path must not contain a comma")
         name = container or f"ott-bot-{uuid.uuid4().hex[:12]}"
         args = self.run_args(name, memory_mb=RUN_MEMORY_MB, pids=RUN_PIDS, tmp_mb=16, tmp_exec=False)
         args.insert(args.index("--rm") + 1, "-i")
-        args += ["--mount", f"type=bind,src={exe},dst=/bot/bot,readonly", self.image, "/bot/bot"]
-        return args
+        return args + ["--mount", f"type=bind,src={exe},dst=/bot/bot,readonly", self.runtime_image_id, "/bot/bot"]
 
     def cwd(self, exe: Path) -> str | None:
         return None
 
     def wait_ready(self, container: str | None, timeout: float = 20.0) -> None:
-        """Block until the container is running so startup latency is not charged to the bot's clock."""
         if not container:
-            return
+            raise InfraError("Docker container identity missing")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            res = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", container], capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
-            if res.returncode == 0 and res.stdout.strip() == "true":
-                return
+            try:
+                result = subprocess.run(["docker", "inspect", "--format", "{{json .State}}", container],
+                                        capture_output=True, text=True,
+                                        timeout=max(0.05, min(2.0, deadline - time.monotonic())),
+                                        creationflags=CREATE_NO_WINDOW)
+            except (OSError, subprocess.TimeoutExpired):
+                self.kill(container)
+                raise InfraError("cannot inspect Docker runtime readiness") from None
+            if result.returncode == 0:
+                try:
+                    state = json.loads(result.stdout)
+                except (ValueError, TypeError):
+                    raise InfraError("invalid Docker runtime state") from None
+                if not isinstance(state, dict):
+                    raise InfraError("invalid Docker runtime state")
+                if state.get("Running"):
+                    return
+                if state.get("Status") in ("exited", "dead", "removing"):
+                    raise InfraError("Docker container exited before readiness; bot verdict requires runtime evidence")
+            elif "no such" not in (result.stderr or "").lower():
+                self.kill(container)
+                raise InfraError("Docker runtime inspection failed")
             time.sleep(0.05)
+        self.kill(container)
+        raise InfraError("Docker container did not become ready within the startup deadline")
 
     def kill(self, container: str | None) -> None:
-        if not container:
+        if not container or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", container):
             return
         try:
-            subprocess.run(["docker", "kill", container], capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW)
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=10,
+                           creationflags=CREATE_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired):
             pass
 
 
-def make_sandbox(kind: str, image: str = IMAGE) -> LocalSandbox | DockerSandbox:
-    if kind == "docker":
-        return DockerSandbox(image)
+def make_sandbox(kind: str, image: str = IMAGE, *, runtime_image: str | None = None,
+                 allowed_source_hashes: Iterable[str] | None = None) -> LocalSandbox | DockerSandbox:
     if kind == "local":
-        return LocalSandbox()
-    if kind == "auto":
-        docker = DockerSandbox(image)
-        return docker if docker.available()[0] else LocalSandbox()
+        return LocalSandbox(allowed_source_hashes=allowed_source_hashes)
+    if kind in ("docker", "auto"):
+        sandbox = DockerSandbox(image, runtime_image=runtime_image, allowed_source_hashes=allowed_source_hashes)
+        if kind == "auto":
+            ok, detail = sandbox.available()
+            if not ok:
+                raise InfraError(f"Docker required; automatic local fallback is disabled: {detail}")
+        return sandbox
     raise ValueError(f"unknown runner: {kind}")

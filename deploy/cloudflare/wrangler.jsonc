@@ -1,0 +1,17 @@
+{
+  "name": "how-i-organize-a-contest",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-18",
+  "workers_dev": true,
+  "assets": {
+    "directory": "../../mockup",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://REPLACE_WITH_WORKER_NAME.workers.dev",
+    "ORIGIN_URL": "https://REPLACE_WITH_TUNNEL.trycloudflare.com"
+  },
+  "observability": { "enabled": false }
+}
