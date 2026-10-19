@@ -3,9 +3,10 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ott import runner
-from ott.sandbox import DockerSandbox, LocalSandbox, make_sandbox
+from ott.sandbox import DockerSandbox, InfraError, LocalSandbox, make_sandbox
 
 DOCKER = DockerSandbox()
 DOCKER_OK, DOCKER_WHY = DOCKER.available()
@@ -52,7 +53,10 @@ def read_line(bot: runner.BotProcess, timeout: float = 20.0):
 
 class SandboxUnitTests(unittest.TestCase):
     def test_docker_flags_isolate_bots(self):
-        args = DockerSandbox("img").bot_argv(Path("/tmp/bot"), "c1")
+        sandbox = DockerSandbox("img")
+        sandbox.runtime_image_id = "img"
+        with mock.patch.object(DockerSandbox, "verify_artifact", return_value={}):
+            args = sandbox.bot_argv(Path("/tmp/bot"), "c1")
         for flag in ("--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=256m",
                      "--memory-swap=256m", "--cpus=1", "--pids-limit=64", "--user=65534:65534"):
             self.assertIn(flag, args)
@@ -65,7 +69,11 @@ class SandboxUnitTests(unittest.TestCase):
     def test_make_sandbox(self):
         self.assertEqual(make_sandbox("local").kind, "local")
         self.assertEqual(make_sandbox("docker").kind, "docker")
-        self.assertIn(make_sandbox("auto").kind, ("local", "docker"))
+        # "auto" never falls back to local: it is either Docker or an explicit InfraError
+        try:
+            self.assertEqual(make_sandbox("auto").kind, "docker")
+        except InfraError as exc:
+            self.assertIn("automatic local fallback is disabled", str(exc))
         with self.assertRaises(ValueError):
             make_sandbox("nope")
 
