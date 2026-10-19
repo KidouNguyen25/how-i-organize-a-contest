@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ott-arena.invalid/schemas/bot-protocol-v1.json",
+  "title": "OTT Bot Protocol v1",
+  "description": "Schema cho từng dòng JSON observation và action. Mỗi dòng UTF-8 tối đa 1 MiB, kết thúc bằng LF.",
+  "$defs": {
+    "coordinate": {
+      "type": "string",
+      "pattern": "^[a-i][1-9]$"
+    },
+    "side": {
+      "enum": ["white", "black"]
+    },
+    "pieceType": {
+      "enum": ["scissors", "hammer", "paper", "king"]
+    },
+    "boardPiece": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["side", "piece", "promotion"],
+      "properties": {
+        "side": { "$ref": "#/$defs/side" },
+        "piece": { "$ref": "#/$defs/pieceType" },
+        "promotion": { "enum": ["rook", "bishop", null] }
+      }
+    },
+    "placeAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "piece", "to"],
+      "properties": {
+        "type": { "const": "place" },
+        "piece": { "$ref": "#/$defs/pieceType" },
+        "to": { "$ref": "#/$defs/coordinate" }
+      }
+    },
+    "moveAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "from", "to"],
+      "properties": {
+        "type": { "const": "move" },
+        "from": { "$ref": "#/$defs/coordinate" },
+        "to": { "$ref": "#/$defs/coordinate" },
+        "promotion": { "enum": ["rook", "bishop"] }
+      }
+    },
+    "action": {
+      "oneOf": [
+        { "$ref": "#/$defs/placeAction" },
+        { "$ref": "#/$defs/moveAction" }
+      ]
+    },
+    "historyEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "side", "action"],
+      "properties": {
+        "phase": { "enum": ["placement", "play"] },
+        "side": { "$ref": "#/$defs/side" },
+        "action": { "$ref": "#/$defs/action" }
+      }
+    },
+    "remainingPieces": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scissors", "hammer", "paper", "king"],
+      "properties": {
+        "scissors": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "hammer": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "paper": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "king": { "type": "integer", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "clocks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["white", "black"],
+      "properties": {
+        "white": { "type": "integer", "minimum": 0 },
+        "black": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "title": "Observation",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "match_id", "phase", "side", "board", "remaining_pieces", "clocks_ms", "legal_actions", "history"],
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "match_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "phase": { "enum": ["placement", "play"] },
+        "side": { "$ref": "#/$defs/side" },
+        "board": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-i][1-9]$" },
+          "additionalProperties": { "$ref": "#/$defs/boardPiece" },
+          "maxProperties": 81
+        },
+        "remaining_pieces": { "$ref": "#/$defs/remainingPieces" },
+        "clocks_ms": { "$ref": "#/$defs/clocks" },
+        "legal_actions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/action" },
+          "maxItems": 4096
+        },
+        "history": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/historyEntry" },
+          "maxItems": 1024
+        }
+      }
+    },
+    {
+      "title": "Action",
+      "$ref": "#/$defs/action"
+    }
+  ]
+}

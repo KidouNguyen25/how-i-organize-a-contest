@@ -1,0 +1,630 @@
+openapi: 3.1.0
+info:
+  title: OTT Arena Web API
+  version: 1.0.0
+  description: >-
+    Hợp đồng thiết kế cho web gateway OTT. API chưa được triển khai. Gateway dùng
+    HTTPS same-origin tại /api/v1; browser không kết nối raw TCP.
+servers:
+  - url: /api/v1
+    description: Same-origin reverse proxy
+tags:
+  - name: Auth
+  - name: Tournaments
+  - name: Entries
+  - name: Bots
+  - name: Matches
+  - name: Organizer
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Tạo tài khoản thí sinh
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 32, pattern: '^[A-Za-z0-9_]+$' }
+                password: { type: string, minLength: 10, maxLength: 128, description: UTF-8 bytes are limited to 128. }
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Đăng nhập và tạo cookie phiên
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 32 }
+                password: { type: string, minLength: 10, maxLength: 128 }
+      responses:
+        '200':
+          description: Set ott_session cookie; return CSRF token in response body.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: 'ott_session; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, csrf_token]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  csrf_token: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Hủy phiên hiện tại
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '204': { description: Session revoked and cookie cleared. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /me:
+    get:
+      tags: [Auth]
+      summary: Xem tài khoản hiện tại
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Current account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /tournaments:
+    get:
+      tags: [Tournaments]
+      summary: Liệt kê giải
+      security: []
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/TournamentStatus' }
+      responses:
+        '200':
+          description: Tournament page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Tournament' } }
+                  next_cursor: { type: [string, 'null'] }
+    post:
+      tags: [Organizer]
+      summary: Tạo giải OTT v1 ở trạng thái DRAFT
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, clock_seconds]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                clock_seconds: { type: integer, enum: [300, 600, 3600] }
+      responses:
+        '201':
+          description: Tournament created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tournament' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /tournaments/{tournamentId}:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    get:
+      tags: [Tournaments]
+      summary: Xem giải và luật OTT
+      security: []
+      responses:
+        '200':
+          description: Tournament detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tournament' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Organizer]
+      summary: Sửa cấu hình khi giải còn DRAFT
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                clock_seconds: { type: integer, enum: [300, 600, 3600] }
+      responses:
+        '200':
+          description: Updated tournament
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tournament' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /tournaments/{tournamentId}/entry:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    get:
+      tags: [Entries]
+      summary: Xem suất của tài khoản hiện tại
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Owned entry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Entries]
+      summary: Đăng ký một suất
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '201':
+          description: Entry created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /tournaments/{tournamentId}/entries:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    get:
+      tags: [Organizer]
+      summary: Organizer xem roster và compile status
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Entries without bot source
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Entry' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /tournaments/{tournamentId}/bots:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    post:
+      tags: [Bots]
+      summary: Tải source tạo bot version mới
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source:
+                  type: string
+                  format: binary
+                  description: C++17 source, tối đa 256 KiB.
+      responses:
+        '202':
+          description: Version queued for compile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotVersion' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Bots]
+      summary: Liệt kê bot versions của tài khoản hiện tại trong giải
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Owned bot versions; response never includes source
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/BotVersion' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /bots/{botVersionId}/source:
+    parameters:
+      - name: botVersionId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Bots]
+      summary: Chủ bot tải lại source của mình
+      security: [{ sessionCookie: [] }]
+      responses:
+        '200':
+          description: Source visible only to owning account
+          content:
+            text/plain:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /tournaments/{tournamentId}/open-registration:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    post:
+      tags: [Organizer]
+      summary: Mở đăng ký từ trạng thái DRAFT
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '200':
+          description: Tournament registration opened
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tournament' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /entries/{entryId}/bot-selection:
+    parameters:
+      - name: entryId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [Bots]
+      summary: Chọn bot version cho suất của mình
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [bot_version_id]
+              properties:
+                bot_version_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Entry with selected version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entry' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /tournaments/{tournamentId}/lock:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    post:
+      tags: [Organizer]
+      summary: Khóa roster và bot versions
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '200':
+          description: Tournament locked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tournament' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /tournaments/{tournamentId}/schedule:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    get:
+      tags: [Matches]
+      summary: Xem lịch đấu
+      security: []
+      responses:
+        '200':
+          description: Match schedule and byes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matches, byes]
+                properties:
+                  matches: { type: array, items: { $ref: '#/components/schemas/MatchSummary' } }
+                  byes: { type: array, items: { type: object, required: [round_no, entry_id], properties: { round_no: { type: integer }, entry_id: { type: string, format: uuid } } } }
+    post:
+      tags: [Organizer]
+      summary: Sinh lịch vòng tròn hai lượt sau khi khóa roster
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '201': { description: Schedule created; operation is idempotent. }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /tournaments/{tournamentId}/start:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    post:
+      tags: [Organizer]
+      summary: Bắt đầu phát các trận đã lên lịch
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '202': { description: Tournament queue started. }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /tournaments/{tournamentId}/cancel:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    post:
+      tags: [Organizer]
+      summary: Hủy giải trước khi RUNNING
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '200':
+          description: Tournament cancelled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tournament' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /tournaments/{tournamentId}/standings:
+    parameters:
+      - { $ref: '#/components/parameters/TournamentId' }
+    get:
+      tags: [Matches]
+      summary: Xem bảng xếp hạng
+      security: []
+      responses:
+        '200':
+          description: Standings calculated from completed matches
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Standing' } }
+  /matches/{matchId}:
+    parameters:
+      - name: matchId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Matches]
+      summary: Xem kết quả và state projection được phép
+      security: []
+      responses:
+        '200':
+          description: Secret placement fields omitted before reveal
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MatchDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /matches/{matchId}/events:
+    parameters:
+      - name: matchId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Matches]
+      summary: Xem event projection sau reveal
+      security: []
+      responses:
+        '200':
+          description: Placement events withheld until play phase starts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/MatchEvent' } }
+        '404': { $ref: '#/components/responses/NotFound' }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: ott_session
+      description: 'Secure; HttpOnly; SameSite=Lax; 12 giờ. Session token không trả cho JavaScript.'
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: CSRF token lấy khi login; bắt buộc cho mọi mutation dùng cookie phiên.
+  parameters:
+    TournamentId:
+      name: tournamentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+  responses:
+    BadRequest:
+      description: Request validation failed
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Unauthorized:
+      description: Authentication required or session expired
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Forbidden:
+      description: Caller lacks permission
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    NotFound:
+      description: Resource not found or not visible to caller
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Conflict:
+      description: State transition or uniqueness conflict
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    PayloadTooLarge:
+      description: Request body exceeds configured limit
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  schemas:
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username, role]
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        role: { type: string, enum: [CONTESTANT, ORGANIZER] }
+    TournamentStatus:
+      type: string
+      enum: [DRAFT, REGISTRATION_OPEN, LOCKED, RUNNING, FINISHED, CANCELLED]
+    Tournament:
+      type: object
+      additionalProperties: false
+      required: [id, name, game_id, game_version, clock_seconds, status, entry_count]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        game_id: { const: ott }
+        game_version: { const: '1' }
+        clock_seconds: { type: integer, enum: [300, 600, 3600] }
+        status: { $ref: '#/components/schemas/TournamentStatus' }
+        entry_count: { type: integer, minimum: 0 }
+    BotVersion:
+      type: object
+      additionalProperties: false
+      required: [id, compile_status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        compile_status: { type: string, enum: [QUEUED, READY, CE] }
+        compile_message: { type: [string, 'null'], maxLength: 4000 }
+        source_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        created_at: { type: string, format: date-time }
+    Entry:
+      type: object
+      additionalProperties: false
+      required: [id, tournament_id, user_id, status]
+      properties:
+        id: { type: string, format: uuid }
+        tournament_id: { type: string, format: uuid }
+        user_id: { type: integer }
+        status: { type: string, enum: [REGISTERED, READY, REMOVED] }
+        selected_bot_version: { oneOf: [{ $ref: '#/components/schemas/BotVersion' }, { type: 'null' }] }
+    MatchSummary:
+      type: object
+      additionalProperties: false
+      required: [id, round_no, leg_no, white_entry_id, black_entry_id, status]
+      properties:
+        id: { type: string, format: uuid }
+        round_no: { type: integer, minimum: 1 }
+        leg_no: { type: integer, enum: [1, 2] }
+        white_entry_id: { type: string, format: uuid }
+        black_entry_id: { type: string, format: uuid }
+        status: { type: string, enum: [SCHEDULED, RUNNING, PAUSED, FINISHED] }
+        result: { type: [string, 'null'], enum: [WHITE_WIN, BLACK_WIN, DRAW, null] }
+        result_reason: { type: [string, 'null'] }
+    MatchDetail:
+      allOf:
+        - $ref: '#/components/schemas/MatchSummary'
+        - type: object
+          properties:
+            phase: { type: string, enum: [PLACEMENT, PLAY] }
+            side_to_act: { type: [string, 'null'], enum: [WHITE, BLACK, null] }
+            clocks_ms:
+              type: object
+              required: [white, black]
+              properties:
+                white: { type: integer, minimum: 0 }
+                black: { type: integer, minimum: 0 }
+            board: { type: [object, 'null'], description: Omitted or null before reveal. }
+    MatchEvent:
+      type: object
+      additionalProperties: false
+      required: [sequence_no, phase, side, action, created_at]
+      properties:
+        sequence_no: { type: integer, minimum: 1 }
+        phase: { type: string, enum: [PLACEMENT, PLAY] }
+        side: { type: string, enum: [WHITE, BLACK] }
+        action: { type: object }
+        created_at: { type: string, format: date-time }
+    Standing:
+      type: object
+      additionalProperties: false
+      required: [rank, entry_id, display_name, points, wins, draws, losses, differential]
+      properties:
+        rank: { type: integer, minimum: 1 }
+        entry_id: { type: string, format: uuid }
+        display_name: { type: string }
+        points: { type: integer, minimum: 0 }
+        wins: { type: integer, minimum: 0 }
+        draws: { type: integer, minimum: 0 }
+        losses: { type: integer, minimum: 0 }
+        differential: { type: integer }
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string, maxLength: 500 }
+
