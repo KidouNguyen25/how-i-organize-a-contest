@@ -1,4 +1,8 @@
 // OTT Arena web client — giao diện kiểu Lichess, gọi API thật tại /api/v1.
+import { createNet } from './net.js';
+const CFG = { mode: 'local', pollMs: 10000, ...(window.OTT_CONFIG || {}) };
+const TUNNEL = CFG.mode === 'tunnel'; // Quick Tunnel: không SSE, polling thưa, có backoff
+const NET = createNet({ tunnel: TUNNEL, pollMs: CFG.pollMs });
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -7,11 +11,15 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const S = { me: null, csrf: null, timers: [], serverOffset: 0 };
 class ApiError extends Error { constructor(status, code, message) { super(message); this.status = status; this.code = code; } }
 async function api(method, path, body) {
-  const res = await fetch('/api/v1' + path, {
-    method, credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', ...(S.csrf && method !== 'GET' ? { 'X-CSRF-Token': S.csrf } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch('/api/v1' + path, {
+      method, credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', ...(S.csrf && method !== 'GET' ? { 'X-CSRF-Token': S.csrf } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) { NET.noteFailure(); throw e; }
+  if ([429, 502, 503, 504].includes(res.status)) NET.noteFailure(parseInt(res.headers.get('Retry-After'), 10) || 0); else NET.noteOk();
   const ctype = res.headers.get('Content-Type') || '';
   const data = res.status === 204 ? null : ctype.includes('json') ? await res.json() : await res.text();
   if (!res.ok) throw new ApiError(res.status, data?.error?.code || 'ERROR', data?.error?.message || `Lỗi ${res.status}`);
@@ -51,7 +59,9 @@ const fmtCountdown = (sec) => {
 const clockLabel = (secs) => `${secs / 60}+0`;
 function syncOffset(serverTime) { if (serverTime) S.serverOffset = serverTime - Date.now() / 1000; }
 function every(ms, fn) { const id = setInterval(fn, ms); S.timers.push(id); return id; }
-function clearTimers() { S.timers.forEach(clearInterval); S.timers = []; }
+function clearTimers() { S.timers.forEach(clearInterval); S.timers = []; NET.stopAll(); }
+// Poll mạng: dùng cho mọi lần gọi API định kỳ (khác every() chỉ dành cho đồng hồ cục bộ). Trả handle cho stopPoll().
+const poll = (ms, fn) => NET.poll(ms, fn);
 let toastT;
 function toast(msg, bad = false) {
   const t = $('#toast'); t.textContent = msg; t.style.borderColor = bad ? '#c33' : ''; t.classList.add('on');
@@ -185,7 +195,7 @@ async function pageHome() {
   }
   const tv = liveItems[0];
   tickMiniClocks(liveItems, fetchedAt);
-  every(3000, async () => { try { const l = await api('GET', '/live'); if (l.items.map((x) => x.id + x.move_count).join() !== liveItems.map((x) => x.id + x.move_count).join()) route(true); } catch { /* bỏ qua */ } });
+  poll(3000, async () => { try { const l = await api('GET', '/live'); if (l.items.map((x) => x.id + x.move_count).join() !== liveItems.map((x) => x.id + x.move_count).join()) route(true); } catch { /* bỏ qua */ } });
   return `<div class="page"><div class="lobby">
     <div class="lobby__col left">
       <section class="box">${S.me ? `<div class="box__title">Xin chào, ${esc(S.me.username)}</div><div class="lobby-actions" style="padding-top:1rem">
@@ -317,12 +327,12 @@ async function pageGame(id) {
       const changed = nm.move_count !== G.m.move_count || nm.status !== G.m.status || nm.revealed !== G.m.revealed || nm.placed.white !== G.m.placed.white || nm.placed.black !== G.m.placed.black;
       setMatch(nm, false);
       if (changed) paintGame();
-      if (nm.status === 'FINISHED') { clearInterval(poll); G.refresh = null; paintGame(); }
+      if (nm.status === 'FINISHED') { NET.stopPoll(poll); G.refresh = null; paintGame(); }
     } catch { /* thử lại ở lần sau */ } finally { busy = false; if (again) { again = false; refresh(); } }
   };
   G.refresh = refresh;
-  // push (SSE) cập nhật ngay; polling chỉ là lưới an toàn (5 giây khi stream đang nối, 1 giây khi mất stream)
-  poll = every(1000, () => { if (LIVE.ok && ++tick % 5) return; refresh(); });
+  // push (SSE) cập nhật ngay; polling chỉ là lưới an toàn (5 giây khi stream đang nối, 1 giây khi mất stream; chế độ tunnel: 10 giây)
+  poll = NET.poll(1000, async () => { if (LIVE.ok && ++tick % 5) return; await refresh(); });
   every(250, tickClocks);
   const wName = esc(m.white.username), bName = esc(m.black.username);
   setTimeout(paintGame, 0);
@@ -352,7 +362,7 @@ async function pageWatch() {
   const recent = feat ? (await api('GET', `/tournaments/${feat.id}/schedule`)).matches.filter((m) => m.status === 'FINISHED').slice(-12).reverse() : [];
   tickMiniClocks(live.items, Date.now());
   const sig = (items) => items.map((x) => x.id + x.move_count).join();
-  every(4000, async () => { try { const l = await api('GET', '/live'); if (sig(l.items) !== sig(live.items)) route(true); } catch { /* bỏ qua */ } });
+  poll(4000, async () => { try { const l = await api('GET', '/live'); if (sig(l.items) !== sig(live.items)) route(true); } catch { /* bỏ qua */ } });
   return `<div class="page"><div class="stack">
     <section class="box"><div class="box__top"><h1>Ván đang diễn ra</h1><span class="tag ${live.items.length ? 'live' : ''}">${live.items.length} ván</span></div></section>
     ${live.items.length ? `<div class="mini-grid c4">${live.items.map(miniGameHTML).join('')}</div>` : '<div class="box box-pad dim">Chưa có ván nào đang diễn ra. Ván xuất hiện ở đây khi organizer bắt đầu giải.</div>'}
@@ -388,8 +398,8 @@ async function pageCode(tid) {
   const pending = d.pending_submission;
   const expired = t.status === 'CODING' && !submitted && !pending && !d.editable;
   if (d.editable) every(500, codeTick);
-  if (t.status === 'CODING' && !submitted && (!d.submit_note || pending?.status === 'QUEUED')) every(10000, async () => { if (!C.editable && !document.hidden) { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.submitted || r.submit_note || JSON.stringify(r.pending_submission) !== JSON.stringify(pending)) route(true); } catch { /* bỏ qua */ } } });
-  if (waiting) every(2000, async () => { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.tournament.status !== 'REGISTRATION_OPEN') route(true); } catch { /* bỏ qua */ } });
+  if (t.status === 'CODING' && !submitted && (!d.submit_note || pending?.status === 'QUEUED')) poll(10000, async () => { if (!C.editable && !document.hidden) { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.submitted || r.submit_note || JSON.stringify(r.pending_submission) !== JSON.stringify(pending)) route(true); } catch { /* bỏ qua */ } } });
+  if (waiting) poll(2000, async () => { try { const r = await api('GET', `/tournaments/${tid}/code`); if (r.tournament.status !== 'REGISTRATION_OPEN') route(true); } catch { /* bỏ qua */ } });
   const banner = submitted ? `<div class="notice ok">🔒 Đã nộp lúc <b>${fmtDate(d.submitted_at)}</b>. Bài nộp là bản cuối cùng và <b>không thể thay đổi</b>.</div>`
     : pending ? `<div class="notice ${pending.status === 'REVIEW' ? 'warn' : ''}">Nguồn đã được nhận lúc <b>${fmtDate(pending.received_at)}</b> và đã khóa. ${pending.status === 'REVIEW' ? 'Cần ban tổ chức kiểm tra sự cố hạ tầng.' : 'Đang chờ biên dịch; thời gian hàng đợi không làm bài nộp trễ hạn.'}</div>`
     : d.submit_note ? `<div class="notice warn">⚠ ${esc(d.submit_note)}</div>`
@@ -595,6 +605,11 @@ function onLiveEvent(ev) {
   softRefresh(slow ? 1500 : 300); // home, danh sách giải, xem nhiều ván, bot, hồ sơ
 }
 function connectStream() {
+  if (TUNNEL) { // Quick Tunnel không hỗ trợ SSE: dùng polling định kỳ
+    const el = $('#live-status');
+    if (el) { el.textContent = `◔ Cập nhật mỗi ${Math.round(CFG.pollMs / 1000)} giây`; el.title = 'Chế độ demo qua Cloudflare Tunnel: trang tự làm mới định kỳ, không có kênh đẩy trực tiếp'; }
+    return;
+  }
   if (!window.EventSource) return;
   const es = new EventSource('/api/v1/stream');
   LIVE.es = es;
