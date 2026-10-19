@@ -5,32 +5,102 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: Run the full API tournament end-to-end test
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
+    name: Python unit suite
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Compile Python modules
+        run: python -m compileall -q core judge ott tests
       - name: Run Python test suite
-        run: python -m unittest discover -v
+        run: python -m unittest discover -s tests -v
+
+  docker-integration:
+    name: Docker judge and sandbox integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build judge runner image
+        run: docker build -f judge/Dockerfile.runner -t lan-judge-cpp17 .
+      - name: Build OTT compiler image
+        run: python -m ott build-image --image ott-bot-runner
+      - name: Build OTT runtime image
+        run: python -m ott build-image --target runtime --image contest-bot-runtime
+      - name: Test Docker judge integration
+        run: python -m unittest discover -s tests -p "test_docker_integration.py" -v
+      - name: Test Docker sandbox integration
+        run: python -m unittest discover -s tests -p "test_ott_sandbox.py" -v
 
   cloudflare-worker:
+    name: Cloudflare Worker tests and dry-run build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Run Worker tests when present
+      - name: Install Worker tooling
+        run: npm install --no-audit --no-fund --no-package-lock
+        working-directory: deploy/cloudflare
+      - name: Run Worker tests
+        run: npm test
+        working-directory: deploy/cloudflare
+      - name: Validate Worker bundle
+        run: npm exec -- wrangler deploy --dry-run --config wrangler.jsonc --outdir "$RUNNER_TEMP/wrangler-dry-run"
+        working-directory: deploy/cloudflare
+
+  e2e:
+    name: Full API tournament end-to-end
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_e2e }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install C++ compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++
+      - name: Seed isolated test accounts
+        run: python -m ott seed --data "$RUNNER_TEMP/ott-e2e-data"
+      - name: Start local API
         run: |
-          if [ -f deploy/cloudflare/package.json ]; then
-            node --test deploy/cloudflare/test/*.test.mjs
-          else
-            echo "No Cloudflare Worker package in this change."
-          fi
+          python -m ott serve --profile development --runner local --data "$RUNNER_TEMP/ott-e2e-data" --move-delay-ms 0 --port 8080 > "$RUNNER_TEMP/ott-api.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/ott-api.pid"
+      - name: Wait for API
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:8080/ > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/ott-api.log"
+          exit 1
+      - name: Play full sample tournament through the API
+        run: python tests/e2e_api.py --data "$RUNNER_TEMP/ott-e2e-data"
