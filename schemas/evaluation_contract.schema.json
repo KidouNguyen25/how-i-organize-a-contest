@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contest.uet.vnu.edu.vn/v2/evaluation_contract.json",
+  "title": "EvaluationContract",
+  "description": "Schemas for EvaluationTask and EvaluationResult exchanged between Core and Workers.",
+  "definitions": {
+    "EvaluationTask": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "season_id",
+        "snapshot_hash",
+        "adapter_id",
+        "adapter_version",
+        "attempt_no",
+        "participants",
+        "task_payload"
+      ],
+      "properties": {
+        "task_id": { "type": "string" },
+        "season_id": { "type": "string" },
+        "snapshot_hash": { "type": "string" },
+        "adapter_id": { "type": "string" },
+        "adapter_version": { "type": "string" },
+        "attempt_no": { "type": "integer", "minimum": 1 },
+        "lease_epoch": { "type": "integer", "minimum": 1 },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["entry_id", "submission_id", "source_hash"],
+            "properties": {
+              "entry_id": { "type": "string" },
+              "submission_id": { "type": "string" },
+              "source_hash": { "type": "string" },
+              "side": { "type": "string" }
+            }
+          }
+        },
+        "task_payload": { "type": "object" },
+        "seed": { "type": "integer" }
+      }
+    },
+    "EvaluationResult": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "result_revision",
+        "status",
+        "verdict",
+        "raw_metrics",
+        "resource_usage",
+        "execution_duration_ms"
+      ],
+      "properties": {
+        "task_id": { "type": "string" },
+        "result_revision": { "type": "integer", "minimum": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["SUCCEEDED", "FAILED_SUBMISSION", "INFRA_ERROR", "PAUSED_REVIEW"]
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["AC", "WA", "TLE", "MLE", "OLE", "CE", "RE", "WHITE_WIN", "BLACK_WIN", "DRAW", "SCORE"]
+        },
+        "raw_metrics": {
+          "type": "object",
+          "properties": {
+            "score": { "type": "number" },
+            "subtasks": { "type": "array" },
+            "game_moves": { "type": "integer" }
+          }
+        },
+        "resource_usage": {
+          "type": "object",
+          "required": ["cpu_time_ms", "max_memory_kb"],
+          "properties": {
+            "cpu_time_ms": { "type": "integer", "minimum": 0 },
+            "max_memory_kb": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "execution_duration_ms": { "type": "integer", "minimum": 0 },
+        "error_message": { "type": "string", "maxLength": 4096 }
+      }
+    }
+  }
+}
