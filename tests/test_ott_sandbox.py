@@ -15,30 +15,36 @@ ECHO = r'''#include <iostream>
 #include <string>
 int main() { std::string l; while (std::getline(std::cin, l)) { std::cout << "echo:" << l << std::endl; } }
 '''
+# Probes block on a "go" line so the container is still running when wait_ready() inspects it.
 PROBES = {
-    "net": r'''#include <arpa/inet.h>
+    "net": r'''#include <string>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <iostream>
-int main() { int s = socket(AF_INET, SOCK_STREAM, 0); sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(80);
+int main() { std::string go; std::getline(std::cin, go); int s = socket(AF_INET, SOCK_STREAM, 0); sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(80);
   inet_pton(AF_INET, "1.1.1.1", &a.sin_addr); int r = (s < 0) ? -1 : connect(s, (sockaddr*)&a, sizeof a);
   std::cout << (r == 0 ? "NET_OPEN" : "NET_BLOCKED") << std::endl; }''',
-    "fs": r'''#include <cstdio>
+    "fs": r'''#include <string>
+#include <cstdio>
 #include <iostream>
-int main() { FILE* a = fopen("/etc/ott-probe", "w"); FILE* b = fopen("/bot/ott-probe", "w"); FILE* c = fopen("/tmp/ott-probe", "w");
+int main() { std::string go; std::getline(std::cin, go); FILE* a = fopen("/etc/ott-probe", "w"); FILE* b = fopen("/bot/ott-probe", "w"); FILE* c = fopen("/tmp/ott-probe", "w");
   std::cout << (!a && !b && c ? "FS_READONLY" : "FS_WRITABLE") << std::endl; }''',
-    "user": r'''#include <unistd.h>
-#include <iostream>
-int main() { std::cout << (getuid() == 0 ? "ROOT" : "NONROOT") << std::endl; }''',
-    "pids": r'''#include <sys/wait.h>
+    "user": r'''#include <string>
 #include <unistd.h>
 #include <iostream>
-int main() { int ok = 0; for (int i = 0; i < 300; i++) { pid_t p = fork(); if (p == 0) { sleep(5); _exit(0); } if (p > 0) ok++; }
+int main() { std::string go; std::getline(std::cin, go); std::cout << (getuid() == 0 ? "ROOT" : "NONROOT") << std::endl; }''',
+    "pids": r'''#include <string>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <iostream>
+int main() { std::string go; std::getline(std::cin, go); int ok = 0; for (int i = 0; i < 300; i++) { pid_t p = fork(); if (p == 0) { sleep(5); _exit(0); } if (p > 0) ok++; }
   std::cout << (ok < 100 ? "PIDS_LIMITED" : "PIDS_UNLIMITED") << std::endl; _exit(0); }''',
-    "mem": r'''#include <cstring>
+    "mem": r'''#include <string>
+#include <cstring>
 #include <iostream>
 #include <vector>
-int main() { std::vector<char*> blocks; for (int i = 0; i < 40; i++) { char* p = new char[64 << 20]; memset(p, 1, 64 << 20); blocks.push_back(p); }
+int main() { std::string go; std::getline(std::cin, go); std::vector<char*> blocks; for (int i = 0; i < 40; i++) { char* p = new char[64 << 20]; memset(p, 1, 64 << 20); blocks.push_back(p); }
   std::cout << "ALLOC_OK" << std::endl; }''',
 }
 
