@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schemas.contest.uet.vnu.edu.vn/v2/season_snapshot.json",
+  "season_id": "season-2026-freshman-cp",
+  "name": "Kỳ thi Lập trình Tân sinh viên 2026 - Vòng khởi động",
+  "revision": 1,
+  "snapshot_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e",
+  "competition_definition_id": "classic-c-cpp-algo",
+  "competition_version": "1.0.0",
+  "adapter_binding": {
+    "adapter_id": "test-suite-cpp17",
+    "adapter_version": "1.0.0",
+    "custom_config": {
+      "problem_id": "sum-two-integers",
+      "test_cases": [
+        {"case_id": "test_1", "points": 25, "is_sample": true},
+        {"case_id": "test_2", "points": 25, "is_sample": false},
+        {"case_id": "test_3", "points": 25, "is_sample": false},
+        {"case_id": "test_4", "points": 25, "is_sample": false}
+      ]
+    }
+  },
+  "runtime_profile": {
+    "profile_id": "cpp17-gcc13-linux",
+    "image_digest": "sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+    "compile_timeout_sec": 15,
+    "compile_cpu_limit": 1.0,
+    "compile_memory_limit_mb": 1024,
+    "runtime_cpu_limit": 1.0,
+    "runtime_memory_limit_mb": 256,
+    "runtime_pids_limit": 64,
+    "network_mode": "none"
+  },
+  "tournament_format": {
+    "format_type": "DIRECT_TASK_QUEUE",
+    "parameters": {
+      "batch_mode": "PER_SUBMISSION"
+    }
+  },
+  "scoring_policy": {
+    "policy_type": "TEST_SUITE_WEIGHTED_SUM",
+    "parameters": {
+      "tie_breakers": ["TOTAL_SCORE", "CPU_TIME", "SUBMISSION_TIME", "ENTRY_ID"]
+    }
+  },
+  "official_submission_policy": "BEST_SCORE",
+  "limits_and_quotas": {
+    "max_teams": 30,
+    "max_members_per_team": 1,
+    "max_source_size_bytes": 262144,
+    "max_compiles_per_team": 20,
+    "submission_window": {
+      "opens_at": 1760832000,
+      "closes_at": 1760875200
+    }
+  },
+  "dispute_and_retention": {
+    "protest_window_seconds": 86400,
+    "artifact_retention_days": 90
+  }
+}

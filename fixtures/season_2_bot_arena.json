@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schemas.contest.uet.vnu.edu.vn/v2/season_snapshot.json",
+  "season_id": "season-2026-fall-ott-cup",
+  "name": "Đại hội Bot Chiến thuật OTT v1 - Cup Mạng Máy Tính",
+  "revision": 1,
+  "snapshot_hash": "b2c3d4e5f6a10718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e",
+  "competition_definition_id": "ott-turn-based-arena",
+  "competition_version": "1.0.0",
+  "adapter_binding": {
+    "adapter_id": "ott-bot-engine",
+    "adapter_version": "1.0.0",
+    "custom_config": {
+      "clock_seconds": 300,
+      "max_moves": 500,
+      "move_delay_ms": 0
+    }
+  },
+  "runtime_profile": {
+    "profile_id": "cpp17-gcc13-linux",
+    "image_digest": "sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+    "compile_timeout_sec": 15,
+    "compile_cpu_limit": 1.0,
+    "compile_memory_limit_mb": 1024,
+    "runtime_cpu_limit": 1.0,
+    "runtime_memory_limit_mb": 256,
+    "runtime_pids_limit": 64,
+    "network_mode": "none"
+  },
+  "tournament_format": {
+    "format_type": "DOUBLE_ROUND_ROBIN",
+    "parameters": {
+      "swap_sides": true,
+      "bye_handling": "NO_POINTS"
+    }
+  },
+  "scoring_policy": {
+    "policy_type": "BOT_MATCH_POINTS",
+    "parameters": {
+      "points_win": 3,
+      "points_draw": 1,
+      "points_loss": 0,
+      "tie_breakers": ["HEAD_TO_HEAD", "SCORE_DIFFERENCE", "REGISTRATION_TIME"]
+    }
+  },
+  "official_submission_policy": "LAST_VALID_BEFORE_DEADLINE",
+  "limits_and_quotas": {
+    "max_teams": 30,
+    "max_members_per_team": 3,
+    "max_source_size_bytes": 262144,
+    "max_compiles_per_team": 10,
+    "submission_window": {
+      "opens_at": 1760832000,
+      "closes_at": 1760875200
+    }
+  },
+  "dispute_and_retention": {
+    "protest_window_seconds": 86400,
+    "artifact_retention_days": 90
+  }
+}

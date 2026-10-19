@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.contest.uet.vnu.edu.vn/v2/season_snapshot.json",
+  "title": "SeasonSnapshot",
+  "description": "Immutable frozen configuration of a contest season.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "season_id",
+    "name",
+    "revision",
+    "snapshot_hash",
+    "competition_definition_id",
+    "competition_version",
+    "adapter_binding",
+    "runtime_profile",
+    "tournament_format",
+    "scoring_policy",
+    "official_submission_policy",
+    "limits_and_quotas",
+    "dispute_and_retention"
+  ],
+  "properties": {
+    "season_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "minLength": 3,
+      "maxLength": 64
+    },
+    "name": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "snapshot_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "competition_definition_id": {
+      "type": "string"
+    },
+    "competition_version": {
+      "type": "string"
+    },
+    "adapter_binding": {
+      "type": "object",
+      "required": ["adapter_id", "adapter_version"],
+      "properties": {
+        "adapter_id": { "type": "string" },
+        "adapter_version": { "type": "string" },
+        "custom_config": { "type": "object" }
+      }
+    },
+    "runtime_profile": {
+      "type": "object",
+      "required": [
+        "profile_id",
+        "image_digest",
+        "compile_timeout_sec",
+        "compile_cpu_limit",
+        "compile_memory_limit_mb",
+        "runtime_cpu_limit",
+        "runtime_memory_limit_mb",
+        "runtime_pids_limit",
+        "network_mode"
+      ],
+      "properties": {
+        "profile_id": { "type": "string" },
+        "image_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "compile_timeout_sec": { "type": "integer", "minimum": 1, "maximum": 60 },
+        "compile_cpu_limit": { "type": "number", "minimum": 0.5, "maximum": 4.0 },
+        "compile_memory_limit_mb": { "type": "integer", "minimum": 128, "maximum": 4096 },
+        "runtime_cpu_limit": { "type": "number", "minimum": 0.5, "maximum": 4.0 },
+        "runtime_memory_limit_mb": { "type": "integer", "minimum": 64, "maximum": 4096 },
+        "runtime_pids_limit": { "type": "integer", "minimum": 16, "maximum": 256 },
+        "network_mode": { "type": "string", "enum": ["none"] }
+      }
+    },
+    "tournament_format": {
+      "type": "object",
+      "required": ["format_type", "parameters"],
+      "properties": {
+        "format_type": {
+          "type": "string",
+          "enum": ["DOUBLE_ROUND_ROBIN", "DIRECT_TASK_QUEUE", "SINGLE_ELIMINATION", "SWISS"]
+        },
+        "parameters": { "type": "object" }
+      }
+    },
+    "scoring_policy": {
+      "type": "object",
+      "required": ["policy_type", "parameters"],
+      "properties": {
+        "policy_type": {
+          "type": "string",
+          "enum": ["TEST_SUITE_WEIGHTED_SUM", "BOT_MATCH_POINTS", "CUSTOM_METRIC"]
+        },
+        "parameters": {
+          "type": "object",
+          "required": ["tie_breakers"],
+          "properties": {
+            "points_win": { "type": "number" },
+            "points_draw": { "type": "number" },
+            "points_loss": { "type": "number" },
+            "tie_breakers": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "official_submission_policy": {
+      "type": "string",
+      "enum": ["LAST_VALID_BEFORE_DEADLINE", "BEST_SCORE", "MANUAL_LOCK"]
+    },
+    "limits_and_quotas": {
+      "type": "object",
+      "required": [
+        "max_teams",
+        "max_members_per_team",
+        "max_source_size_bytes",
+        "max_compiles_per_team",
+        "submission_window"
+      ],
+      "properties": {
+        "max_teams": { "type": "integer", "minimum": 2, "maximum": 128 },
+        "max_members_per_team": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "max_source_size_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576 },
+        "max_compiles_per_team": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "submission_window": {
+          "type": "object",
+          "required": ["opens_at", "closes_at"],
+          "properties": {
+            "opens_at": { "type": "integer" },
+            "closes_at": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "dispute_and_retention": {
+      "type": "object",
+      "required": ["protest_window_seconds", "artifact_retention_days"],
+      "properties": {
+        "protest_window_seconds": { "type": "integer", "minimum": 3600 },
+        "artifact_retention_days": { "type": "integer", "minimum": 7 }
+      }
+    }
+  }
+}
