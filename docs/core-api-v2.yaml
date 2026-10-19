@@ -1,0 +1,312 @@
+openapi: 3.1.0
+info:
+  title: Contest Platform Core API v2
+  version: 2.0.0
+  description: >-
+    Generic Contest Platform Core API v2 designed by Phat (A01-A08).
+    Supports multiple contest categories (Test-suite CP problems, Turn-based bot arenas, Continuous metrics).
+servers:
+  - url: /api/v2
+    description: Production Core API Gateway
+
+paths:
+  /competitions:
+    get:
+      summary: List all competition definition blueprints
+      responses:
+        '200':
+          description: List of supported competition templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CompetitionDefinition'
+
+  /seasons:
+    get:
+      summary: List all contest seasons
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: competition_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of contest seasons
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SeasonSummary'
+    post:
+      summary: Create a new contest season (Draft)
+      security:
+        - sessionAuth: [ORGANIZER]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSeasonRequest'
+      responses:
+        '201':
+          description: Season created in DRAFT state
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /seasons/{season_id}:
+    get:
+      summary: Get details and frozen snapshot of a season
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Season details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeasonDetail'
+
+  /seasons/{season_id}/publish:
+    post:
+      summary: Validate and freeze SeasonSnapshot, open registration (Dual-approval)
+      security:
+        - sessionAuth: [ORGANIZER, ARBITER]
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Season published and snapshot locked
+        '409':
+          description: Validation error or invalid state transition
+
+  /seasons/{season_id}/entries:
+    get:
+      summary: List registered entries in the season
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of entries
+    post:
+      summary: Register team entry in the season
+      security:
+        - sessionAuth: [CONTESTANT]
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [team_name]
+              properties:
+                team_name: { type: string, minLength: 2, maxLength: 64 }
+      responses:
+        '201':
+          description: Entry registered
+        '409':
+          description: Team quota exceeded or duplicate registration
+
+  /seasons/{season_id}/submissions:
+    get:
+      summary: List submissions for the authenticated team (or all for organizer/auditor)
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Submissions list
+    post:
+      summary: Submit source code
+      security:
+        - sessionAuth: [CONTESTANT]
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entry_id, source]
+              properties:
+                entry_id: { type: string }
+                language: { type: string, default: "cpp17" }
+                source: { type: string, maxLength: 262144 }
+      responses:
+        '201':
+          description: Submission received, timestamped, hashed and enqueued for compilation
+        '400':
+          description: Submission size exceeded or format invalid
+        '403':
+          description: Deadline passed or submission window closed
+
+  /seasons/{season_id}/standings:
+    get:
+      summary: Get published standings (with revision tracking)
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current standings revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandingsResponse'
+
+  /seasons/{season_id}/appeals:
+    post:
+      summary: Submit a protest or appeal regarding evaluation results
+      security:
+        - sessionAuth: [CONTESTANT]
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entry_id, target_evaluation_id, reason]
+              properties:
+                entry_id: { type: string }
+                target_evaluation_id: { type: string }
+                reason: { type: string, minLength: 10, maxLength: 2048 }
+      responses:
+        '201':
+          description: Appeal submitted and assigned appeal_id
+        '400':
+          description: Protest window expired
+
+  /seasons/{season_id}/rejudge:
+    post:
+      summary: Request or approve a rejudge batch (Dual-approval workflow)
+      security:
+        - sessionAuth: [ORGANIZER, ARBITER]
+      parameters:
+        - name: season_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope, reason]
+              properties:
+                scope:
+                  type: string
+                  enum: [ALL_SEASON, PROBLEM_SUBSET, SPECIFIC_MATCHES]
+                target_ids:
+                  type: array
+                  items: { type: string }
+                reason: { type: string, minLength: 10 }
+      responses:
+        '202':
+          description: Rejudge batch approved and evaluation tasks re-queued with incremented revision
+
+components:
+  securitySchemes:
+    sessionAuth:
+      type: apiKey
+      in: cookie
+      name: session_token
+  schemas:
+    CompetitionDefinition:
+      type: object
+      required: [definition_id, version, category, name]
+      properties:
+        definition_id: { type: string }
+        version: { type: string }
+        category: { type: string }
+        name: { type: string }
+    CreateSeasonRequest:
+      type: object
+      required: [season_id, name, competition_definition_id]
+      properties:
+        season_id: { type: string }
+        name: { type: string }
+        competition_definition_id: { type: string }
+    SeasonSummary:
+      type: object
+      required: [season_id, name, status, revision]
+      properties:
+        season_id: { type: string }
+        name: { type: string }
+        status: { type: string }
+        revision: { type: integer }
+    SeasonDetail:
+      type: object
+      required: [season_id, name, status, revision, snapshot]
+      properties:
+        season_id: { type: string }
+        name: { type: string }
+        status: { type: string }
+        revision: { type: integer }
+        snapshot: { type: object }
+    StandingsResponse:
+      type: object
+      required: [season_id, standings_revision, updated_at, rows]
+      properties:
+        season_id: { type: string }
+        standings_revision: { type: integer }
+        updated_at: { type: integer }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [rank, entry_id, team_name, points]
+            properties:
+              rank: { type: integer }
+              entry_id: { type: string }
+              team_name: { type: string }
+              points: { type: number }
+  responses:
+    BadRequest:
+      description: Invalid request parameters or payload
+    Forbidden:
+      description: Insufficient privileges or scope violation
