@@ -106,6 +106,7 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
     side = pc["side"]
     f, r = parse_sq(origin)
     out: list[Action] = []
+    append = out.append
 
     if pc["piece"] == "king":
         for dx, dy in EIGHT:
@@ -113,8 +114,9 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
             if in_board(nf, nr):
                 dest = _SQUARES[nr][nf]
                 if dest not in board:
-                    _add(out, origin, dest, pc, nr)
+                    append({"type": "move", "from": origin, "to": dest})
     elif not pc["promotion"]:
+        promotion_rank = 8 if side == "white" else 0
         for dx, dy, can_capture in _PAWN_STEPS[1 if side == "white" else -1]:
             nf, nr = f + dx, r + dy
             if not in_board(nf, nr):
@@ -122,9 +124,17 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
             dest = _SQUARES[nr][nf]
             target = board.get(dest)
             if target is None:
-                _add(out, origin, dest, pc, nr)
+                if nr == promotion_rank:
+                    append({"type": "move", "from": origin, "to": dest, "promotion": "rook"})
+                    append({"type": "move", "from": origin, "to": dest, "promotion": "bishop"})
+                else:
+                    append({"type": "move", "from": origin, "to": dest})
             elif target["side"] != side and can_capture and _can_capture(pc, target):
-                _add(out, origin, dest, pc, nr)
+                if nr == promotion_rank:
+                    append({"type": "move", "from": origin, "to": dest, "promotion": "rook"})
+                    append({"type": "move", "from": origin, "to": dest, "promotion": "bishop"})
+                else:
+                    append({"type": "move", "from": origin, "to": dest})
     else:
         slide = ORTHO if pc["promotion"] == "rook" else DIAG
         for dx, dy in slide:
@@ -133,12 +143,12 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
                 dest = _SQUARES[nr][nf]
                 target = board.get(dest)
                 if target is None:
-                    _add(out, origin, dest, pc, nr)
+                    append({"type": "move", "from": origin, "to": dest})
                     nf += dx
                     nr += dy
                     continue
                 if target["side"] != side and _can_capture(pc, target):
-                    _add(out, origin, dest, pc, nr)
+                    append({"type": "move", "from": origin, "to": dest})
                 break
         for dx, dy in EIGHT:
             if (dx, dy) not in slide:
@@ -148,7 +158,7 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
                 dest = _SQUARES[nr][nf]
                 target = board.get(dest)
                 if target is None or (target["side"] != side and _can_capture(pc, target)):
-                    _add(out, origin, dest, pc, nr)
+                    append({"type": "move", "from": origin, "to": dest})
     return out
 
 
@@ -225,14 +235,6 @@ def _piece_can_move_to(board: dict[str, Any], origin: str, pc: dict[str, Any], d
     return (dx, dy) in EIGHT and (dx, dy) not in slide and (
         target is None or (target["side"] != side and _can_capture(pc, target))
     )
-
-
-def _add(out: list[Action], origin: str, dest: str, pc: dict[str, Any], dest_rank: int) -> None:
-    if pc["piece"] != "king" and not pc["promotion"] and dest_rank == last_rank(pc["side"]):
-        out.append({"type": "move", "from": origin, "to": dest, "promotion": "rook"})
-        out.append({"type": "move", "from": origin, "to": dest, "promotion": "bishop"})
-    else:
-        out.append({"type": "move", "from": origin, "to": dest})
 
 
 def legal_actions(state: dict[str, Any], side: str | None = None) -> list[Action]:
