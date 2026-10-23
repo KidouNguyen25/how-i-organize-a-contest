@@ -326,9 +326,17 @@ async function pageTournament(id, q) {
     scheduleParams.set('cursor', scheduleCursor);
     scheduleParams.set('direction', q.get('direction') || 'after');
   }
-  const [t, st] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/standings`)]);
+  const [t, standingsData] = await Promise.all([
+    api('GET', `/tournaments/${id}`),
+    tab === 'standings' ? api('GET', `/tournaments/${id}/standings`) : Promise.resolve({ items: [] }),
+  ]);
+  let st = standingsData;
   if (renderId !== routing) return '';
   syncOffset(t.server_time);
+  if (tab === 'pairings' && t.status === 'FINISHED') {
+    st = await api('GET', `/tournaments/${id}/standings?compact=top3`);
+    if (renderId !== routing) return '';
+  }
   const sched = tab === 'pairings'
     ? await api('GET', `/tournaments/${id}/schedule?${scheduleParams}`)
     : { matches: [], total: 0, has_more: false, limit: 100, offset };

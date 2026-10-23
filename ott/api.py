@@ -790,12 +790,20 @@ class App:
 
         @r("GET", "/tournaments/{tid}/standings")
         def get_standings(ctx: Ctx, tid: str) -> Any:
+            query = ctx.query
+            compact_values = query.get("compact", [])
+            if len(compact_values) > 1 or (compact_values and compact_values[0] != "top3"):
+                raise ApiError(400, "BAD_QUERY", "Invalid standings compact mode.")
+            compact = compact_values == ["top3"]
             status = app.get_tournament_status(tid)
             entries = app.store.list_entries(tid)
             matches_count = app.store.count_finished_match_results(tid)
             with closing(app.store.iter_finished_match_results(tid)) as matches:
                 rows = standings(entries, matches, matches_in_schedule_order=True,
-                                 matches_are_finished=True, matches_count=matches_count)
+                                 matches_are_finished=True, matches_count=matches_count,
+                                 include_sheet=not compact)
+            if compact:
+                rows = rows[:3]
             return 200, {"items": rows, "status": status}
 
         @r("GET", "/tournaments/{tid}/entries")
