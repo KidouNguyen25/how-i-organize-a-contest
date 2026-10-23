@@ -994,7 +994,14 @@ class App:
 
         @r("GET", "/live")
         def live(ctx: Ctx) -> Any:
-            overviews = app.store.list_matches(statuses=("RUNNING",), limit=24, include_state=False)
+            tournament_ids = ctx.query.get("tournament_id", [])
+            if len(tournament_ids) > 1:
+                raise ApiError(400, "BAD_QUERY", "Invalid tournament_id query parameter.")
+            tournament_id = tournament_ids[0] if tournament_ids else None
+            overviews = app.store.list_matches(
+                tid=tournament_id, statuses=("RUNNING",),
+                limit=64 if tournament_id else 24, include_state=False,
+            )
             misses = [m["id"] for m in overviews if app.cached_view(m, with_moves=False) is None]
             renders = {m["id"]: m for m in app.store.get_match_renders(misses)}
             items = [app.detail(renders.get(m["id"], m), with_moves=False) for m in overviews]

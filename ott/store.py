@@ -272,6 +272,7 @@ class Store:
             con.execute("CREATE INDEX IF NOT EXISTS matches_black_entry_result_idx ON matches(black_entry_id,status,result)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_running_lease_idx ON matches(COALESCE(lease_expires_at,0)) WHERE status='RUNNING'")
             con.execute("CREATE INDEX IF NOT EXISTS matches_running_order_idx ON matches(leg_no,round_no,pairing_no) WHERE status='RUNNING'")
+            con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_running_order_idx ON matches(tournament_id,leg_no,round_no,pairing_no) WHERE status='RUNNING'")
             con.execute("DELETE FROM sessions WHERE expires_at <= ?", (now(),))
 
     # ---------------- users & sessions ----------------
@@ -860,9 +861,10 @@ class Store:
             args.extend(statuses)
         projection = self._MATCH_SQL if include_state else self._MATCH_OVERVIEW_SQL
         if statuses == ("RUNNING",):
+            index = "matches_tournament_running_order_idx" if tid else "matches_running_order_idx"
             projection = projection.replace(
                 "FROM matches m JOIN",
-                "FROM matches m INDEXED BY matches_running_order_idx JOIN",
+                f"FROM matches m INDEXED BY {index} JOIN",
                 1,
             )
         sql = projection + (f"WHERE {' AND '.join(where)} " if where else "")

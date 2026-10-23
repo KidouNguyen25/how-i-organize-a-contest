@@ -344,7 +344,9 @@ async function pageTournament(id, q) {
   let entry = null;
   if (isContestant()) { try { entry = await api('GET', `/tournaments/${id}/entry`); } catch { /* chưa đăng ký */ } }
   if (renderId !== routing) return '';
-  const liveDetail = t.matches_running ? (await api('GET', '/live')).items.filter((m) => m.tournament_id === id) : [];
+  const liveDetail = t.matches_running
+    ? (await api('GET', `/live?tournament_id=${encodeURIComponent(id)}`)).items
+    : [];
   if (renderId !== routing) return '';
   const mine = S.me ? liveDetail.find((m) => m.white.username === S.me.username || m.black.username === S.me.username) : null;
   let actions = '';
