@@ -878,6 +878,16 @@ class Store:
             row = con.execute(self._MATCH_SQL + "WHERE m.id = ?", (mid,)).fetchone()
         return dict(row) if row else None
 
+    def get_match_execution(self, mid: str) -> dict[str, Any] | None:
+        """Read only persisted fields consumed by the match runner."""
+        with self.tx() as con:
+            row = con.execute(
+                "SELECT id,white_entry_id,black_entry_id,execution_started,state_json,execution_snapshot,"
+                "white_clock_ms,black_clock_ms,last_event_seq FROM matches WHERE id=?",
+                (mid,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_match_overview(self, mid: str) -> dict[str, Any] | None:
         """Read match metadata without loading state or execution snapshots."""
         with self.tx() as con:

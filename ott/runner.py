@@ -254,7 +254,7 @@ class MatchRunner:
         try:
             self.store.heartbeat(self.mid,self.lease)
             heartbeat.start()
-            match = self.store.get_match(self.mid)
+            match = self.store.get_match_execution(self.mid)
             if not match:
                 raise InfraError("match disappeared")
             if match["execution_started"] or match["state_json"]:
