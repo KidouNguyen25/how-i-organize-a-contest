@@ -202,6 +202,9 @@ class App:
         self.compile_check_limiter = RateLimiter()
         self.open_registration = True
         self.routes: list[tuple[str, re.Pattern[str], Callable[..., Any], str]] = []
+        self.routes_by_prefix: dict[
+            str, dict[str, list[tuple[str, re.Pattern[str], Callable[..., Any], str]]]
+        ] = {}
         self._register_routes()
 
     def start(self) -> None:
@@ -507,7 +510,10 @@ class App:
         regex = re.compile("^" + re.sub(r"\{(\w+)\}", r"(?P<\1>[^/]+)", pattern) + "$")
 
         def deco(fn: Callable) -> Callable:
-            self.routes.append((method, regex, fn, "mut" if (mutating if mutating is not None else method != "GET") else "read"))
+            route = (method, regex, fn, "mut" if (mutating if mutating is not None else method != "GET") else "read")
+            self.routes.append(route)
+            prefix = pattern.lstrip("/").split("/", 1)[0]
+            self.routes_by_prefix.setdefault(prefix, {}).setdefault(method, []).append(route)
             return fn
 
         return deco
@@ -1438,13 +1444,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(404, "STREAM_DISABLED", "Use polling for this deployment.")
                 self._stream()
                 return
-            matched = False
-            for m, regex, fn, kind in self.app.routes:
+            prefix = sub.lstrip("/").split("/", 1)[0]
+            prefix_routes = self.app.routes_by_prefix.get(prefix, {})
+            for _, regex, fn, kind in prefix_routes.get(method, ()):
                 hit = regex.match(sub)
                 if not hit:
-                    continue
-                matched = True
-                if m != method:
                     continue
                 if kind == "mut" and sub not in ("/auth/login", "/auth/register"):
                     if not user or not hmac.compare_digest(self.headers.get("X-CSRF-Token", "").encode("utf-8"), user["csrf_token"].encode("utf-8")):
@@ -1454,6 +1458,11 @@ class Handler(BaseHTTPRequestHandler):
                 status, payload = fn(ctx, **hit.groupdict())
                 self._send(status, payload, ctx)
                 return
+            matched = any(
+                regex.match(sub)
+                for route_method, routes in prefix_routes.items() if route_method != method
+                for _, regex, _, _ in routes
+            )
             raise ApiError(405 if matched else 404, "METHOD_NOT_ALLOWED" if matched else "NOT_FOUND", "No such endpoint.")
         except (ApiError, RequestRejected) as exc:
             self.close_connection = True
