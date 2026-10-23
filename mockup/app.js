@@ -787,7 +787,11 @@ function onLiveEvent(ev) {
   if (k === 'login' || k === 'register' || k === 'rules') return;
   if (ev.type === 'hello') { softRefresh(0); return; }
   const slow = ev.type === 'match' && ev.move_count !== undefined; // chỉ là nước đi mới: làm mới thưa hơn
-  if (k === 'tournament') { if (tid === PAGE.id) softRefresh(slow ? 1500 : 300); return; }
+  if (k === 'tournament') {
+    if (tid !== PAGE.id) return;
+    if (ev.type === 'match' && ev.move_count !== undefined) return; // standings change only when match status changes
+    softRefresh(300); return;
+  }
   if (k === 'organizer' && PAGE.id === 'manage') { if (tid === PAGE.sub) softRefresh(slow ? 1500 : 300); return; }
   softRefresh(slow ? 1500 : 300); // home, danh sách giải, xem nhiều ván, bot, hồ sơ
 }
