@@ -267,6 +267,7 @@ class Store:
                 con.execute("ALTER TABLE submission_receipts ADD COLUMN runtime_profile TEXT")
             con.execute("CREATE INDEX IF NOT EXISTS entries_user_status_idx ON entries(user_id,status,tournament_id)")
             con.execute("CREATE INDEX IF NOT EXISTS entries_tournament_status_idx ON entries(tournament_id,status)")
+            con.execute("CREATE INDEX IF NOT EXISTS entries_tournament_roster_idx ON entries(tournament_id,registered_at,id) WHERE status<>'REMOVED'")
             con.execute("CREATE INDEX IF NOT EXISTS tournaments_coding_deadline_idx ON tournaments(status,coding_deadline)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_claim_order_idx ON matches(leg_no,round_no,pairing_no,tournament_id,id) WHERE status='SCHEDULED'")
             con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_status_idx ON matches(tournament_id,status)")
@@ -480,6 +481,21 @@ class Store:
         with self.tx() as con:
             rows = con.execute(projection + "WHERE e.user_id = ? AND e.status <> 'REMOVED'", (user_id,)).fetchall()
         return [dict(r) for r in rows]
+
+    def schedule_roster(self, tid: str) -> tuple[int, list[str]]:
+        """Return roster size and ordered IDs only when byes need them."""
+        with self.tx() as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM entries WHERE tournament_id=? AND status<>'REMOVED'", (tid,)
+            ).fetchone()
+            count = int(row[0])
+            if count % 2 == 0:
+                return count, []
+            rows = con.execute(
+                "SELECT id FROM entries WHERE tournament_id=? AND status<>'REMOVED' "
+                "ORDER BY registered_at,id", (tid,)
+            ).fetchall()
+        return count, [row[0] for row in rows]
 
     def iter_user_standings_inputs(self, user_id: int, *, finished_matches_only: bool = False,
                                    stream_matches: bool = False) -> Iterator[dict[str, Any]]:

@@ -743,8 +743,7 @@ class App:
             def format_cursor(match: dict[str, Any]) -> str:
                 return ",".join(str(match[key]) for key in ("leg_no", "round_no", "pairing_no", "id"))
 
-            entries = app.store.list_entries(tid)
-            entry_ids = [e["id"] for e in entries]
+            entry_count, entry_ids = app.store.schedule_roster(tid)
             paged = "limit" in query or "offset" in query or "cursor" in query or keyset
             if not paged:
                 matches = app.store.list_match_summaries(tid)
@@ -772,13 +771,13 @@ class App:
                 matches = app.store.list_match_summaries(tid, limit, offset)
                 has_more = offset + len(matches) < total
                 previous_cursor = next_cursor = None
-            if len(entry_ids) % 2 and total == len(entry_ids) * (len(entry_ids) - 1):
+            if entry_count % 2 and total == entry_count * (entry_count - 1):
                 bye_rows = [
                     {"leg_no": leg, "round_no": round_no, "entry_id": entry_id}
                     for leg in (1, 2)
                     for round_no, entry_id in enumerate(entry_ids, start=1)
                 ] if total else []
-            elif len(entry_ids) % 2:
+            elif entry_count % 2:
                 bye_rows = byes(entry_ids, app.store.list_match_summaries(tid))
             else:
                 bye_rows = []
