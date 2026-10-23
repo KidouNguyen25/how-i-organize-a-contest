@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import zlib
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import chain, groupby
@@ -172,7 +173,13 @@ class Store:
         self._connections = threading.local()
         self._compile_flags: dict[str, threading.Event] = {}
         self._compile_flags_lock = threading.Lock()
+        self._schedule_count_cache: OrderedDict[str, int] = OrderedDict()
+        self._schedule_count_lock = threading.Lock()
+        self._schedule_locks = tuple(threading.Lock() for _ in range(64))
         self._migrate()
+
+    def _schedule_lock(self, tid: str) -> threading.Lock:
+        return self._schedule_locks[hash(tid) % len(self._schedule_locks)]
 
     def enable_thread_connection_reuse(self) -> None:
         self._connections.enabled = True
@@ -773,17 +780,20 @@ class Store:
                                      rows: Iterable[tuple[int, int, int, str, str]],
                                      clock_ms: int) -> None:
         """Insert compact schedule rows directly into SQLite."""
-        with self.tx() as con:
-            if con.execute("SELECT 1 FROM matches WHERE tournament_id = ? LIMIT 1", (tid,)).fetchone():
-                raise StoreError(409, "SCHEDULE_EXISTS", "Schedule already exists.")
-            stamp = now()
-            con.executemany(
-                "INSERT INTO matches(id,tournament_id,round_no,leg_no,pairing_no,white_entry_id,black_entry_id,status,phase,"
-                "white_clock_ms,black_clock_ms,updated_at,engine_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ((str(uuid.uuid4()), tid, round_no, leg_no, pairing_no, white, black,
-                  "SCHEDULED", "PLACEMENT", clock_ms, clock_ms, stamp, ENGINE_VERSION)
-                 for round_no, leg_no, pairing_no, white, black in rows),
-            )
+        with self._schedule_lock(tid):
+            with self.tx() as con:
+                if con.execute("SELECT 1 FROM matches WHERE tournament_id = ? LIMIT 1", (tid,)).fetchone():
+                    raise StoreError(409, "SCHEDULE_EXISTS", "Schedule already exists.")
+                stamp = now()
+                con.executemany(
+                    "INSERT INTO matches(id,tournament_id,round_no,leg_no,pairing_no,white_entry_id,black_entry_id,status,phase,"
+                    "white_clock_ms,black_clock_ms,updated_at,engine_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ((str(uuid.uuid4()), tid, round_no, leg_no, pairing_no, white, black,
+                      "SCHEDULED", "PLACEMENT", clock_ms, clock_ms, stamp, ENGINE_VERSION)
+                     for round_no, leg_no, pairing_no, white, black in rows),
+                )
+            with self._schedule_count_lock:
+                self._schedule_count_cache.pop(tid, None)
         HUB.publish("tournament", tid)
 
     _MATCH_FROM_SQL = (
@@ -908,9 +918,20 @@ class Store:
         return [dict(row) for row in rows], has_more
 
     def count_match_summaries(self, tid: str) -> int:
-        with self.tx() as con:
-            row = con.execute("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", (tid,)).fetchone()
-        return int(row[0])
+        with self._schedule_lock(tid):
+            with self._schedule_count_lock:
+                cached = self._schedule_count_cache.get(tid)
+                if cached is not None:
+                    self._schedule_count_cache.move_to_end(tid)
+                    return cached
+            with self.tx() as con:
+                row = con.execute("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", (tid,)).fetchone()
+            count = int(row[0])
+            with self._schedule_count_lock:
+                self._schedule_count_cache[tid] = count
+                if len(self._schedule_count_cache) > 256:
+                    self._schedule_count_cache.popitem(last=False)
+            return count
 
     def list_recent_finished_match_summaries(self, tid: str, limit: int) -> list[dict[str, Any]]:
         """Read latest finished rows through the partial schedule index."""
