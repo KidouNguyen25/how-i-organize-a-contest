@@ -71,7 +71,7 @@ jobs:
         run: npm test
         working-directory: deploy/cloudflare
       - name: Validate Worker bundle
-        run: npm exec -- wrangler deploy --dry-run --config wrangler.jsonc --outdir "$RUNNER_TEMP/wrangler-dry-run"
+        run: npm exec -- wrangler deploy --dry-run --config wrangler.toml --outdir "$RUNNER_TEMP/wrangler-dry-run"
         working-directory: deploy/cloudflare
 
   e2e:
