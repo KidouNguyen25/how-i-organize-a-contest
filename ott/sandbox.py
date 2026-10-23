@@ -597,9 +597,12 @@ class DockerSandbox(_ArtifactPolicy):
             _publish_artifact(built, out, self._manifest(built, source, language))
         return True, None
 
-    def bot_argv(self, exe: Path, container: str | None = None) -> list[str]:
-        manifest = self.verify_artifact(exe)
-        profile = language_profile(manifest["language"])
+    def bot_argv(self, exe: Path, container: str | None = None, *,
+                 verified_language: str | None = None) -> list[str]:
+        if verified_language is None:
+            manifest = self.verify_artifact(exe)
+            verified_language = manifest["language"]
+        profile = language_profile(verified_language)
         exe = _checked_path(exe)
         if "," in str(exe):
             raise InfraError("Docker mount path must not contain a comma")

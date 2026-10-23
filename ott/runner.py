@@ -91,7 +91,7 @@ def ensure_binary_info(store: Store, data_dir: Path, bot_id: str) -> tuple[Path,
 
 
 class BotProcess:
-    def __init__(self, exe: Path, label: str) -> None:
+    def __init__(self, exe: Path, label: str, language: str | None = None) -> None:
         self.label = label
         self.q: queue.Queue[bytes | None] = queue.Queue(maxsize=2)
         self.stderr_tail = b""
@@ -101,8 +101,11 @@ class BotProcess:
         self.container = f"ott-bot-{uuid.uuid4().hex[:12]}" if SANDBOX.kind == "docker" else None
         self.write_requests: queue.Queue[tuple[bytes, threading.Event, list[bool]] | None] = queue.Queue(maxsize=1)
         self.writer_stop = threading.Event()
+        argv = (SANDBOX.bot_argv(exe, self.container, verified_language=language)
+                if isinstance(SANDBOX, DockerSandbox) and language is not None
+                else SANDBOX.bot_argv(exe, self.container))
         self.proc = subprocess.Popen(
-            SANDBOX.bot_argv(exe, self.container), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=SANDBOX.cwd(exe), creationflags=CREATE_NO_WINDOW,
         )
         threading.Thread(target=self._read_out, daemon=True).start()
@@ -256,6 +259,7 @@ class MatchRunner:
             self.adapter = get_adapter(snapshot["game_id"],snapshot["game_version"])
             exes = {}
             artifacts = {}
+            languages = {}
             for side in ("white", "black"):
                 self._check_control()
                 eid = match[f"{side}_entry_id"]
@@ -267,6 +271,7 @@ class MatchRunner:
                         or bot["language"] != frozen.get("language", "cpp17")):
                     raise InfraError("submitted source hash or language differs from execution snapshot")
                 exes[side], artifacts[side] = ensure_binary_info(self.store,self.data_dir,frozen["bot_submission_id"])
+                languages[side] = bot["language"]
             self._check_control()
             self.store.start_execution(self.mid,self.lease,{
                 "kind":SANDBOX.kind,"image":getattr(SANDBOX,"image",None),
@@ -310,7 +315,7 @@ class MatchRunner:
         for side in ("white","black"):
             self._check_control()
             try:
-                bots[side] = BotProcess(exes[side],side)
+                bots[side] = BotProcess(exes[side],side,languages[side])
             except OSError as exc:
                 raise InfraError("bot runtime could not start") from exc
         for side in ("white","black"):
