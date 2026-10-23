@@ -1196,14 +1196,16 @@ class _DeadlineScheduler:
     def cancel(self, deadline: "ConnectionDeadline", *, close: bool = False) -> bool:
         with self._condition:
             was_active = self._active.pop(deadline, None) is not None
-            deadline._deadline = None
             if was_active:
+                deadline._deadline = None
                 deadline._callback_done.set()
             release = close and not deadline._closed
             if close:
+                deadline._deadline = None
                 deadline._closed = True
-            self._compact()
-            self._condition.notify()
+            if was_active:
+                self._compact()
+                self._condition.notify()
             return release
 
     def stop(self) -> None:
