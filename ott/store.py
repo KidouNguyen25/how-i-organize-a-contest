@@ -263,7 +263,8 @@ class Store:
             con.execute("CREATE INDEX IF NOT EXISTS tournaments_coding_deadline_idx ON tournaments(status,coding_deadline)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_claim_order_idx ON matches(leg_no,round_no,pairing_no,tournament_id,id) WHERE status='SCHEDULED'")
             con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_status_idx ON matches(tournament_id,status)")
-            con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_schedule_idx ON matches(tournament_id,leg_no,round_no,pairing_no)")
+            con.execute("DROP INDEX IF EXISTS matches_tournament_schedule_idx")
+            con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_schedule_cursor_idx ON matches(tournament_id,leg_no,round_no,pairing_no,id)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_white_entry_updated_idx ON matches(white_entry_id,updated_at DESC)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_black_entry_updated_idx ON matches(black_entry_id,updated_at DESC)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_finished_schedule_idx ON matches(tournament_id,leg_no,round_no,pairing_no) WHERE status='FINISHED'")
@@ -880,6 +881,29 @@ class Store:
         with self.tx() as con:
             rows = con.execute(sql, args).fetchall()
         return [dict(row) for row in rows]
+
+    def list_match_summary_page(self, tid: str, limit: int, *,
+                                cursor: tuple[int, int, int, str] | None = None,
+                                direction: str = "after") -> tuple[list[dict[str, Any]], bool]:
+        """Read one schedule page by index seek instead of walking a deep offset."""
+        reverse = direction == "before"
+        if direction not in ("after", "before"):
+            raise ValueError("Schedule page direction must be after or before.")
+        sql = self._MATCH_SUMMARY_SQL + "WHERE m.tournament_id = ? "
+        args: tuple[Any, ...] = (tid,)
+        if cursor is not None:
+            comparison = "<" if reverse else ">"
+            sql += f"AND (m.leg_no,m.round_no,m.pairing_no,m.id) {comparison} (?,?,?,?) "
+            args += cursor
+        order = "DESC" if reverse else "ASC"
+        sql += f"ORDER BY m.leg_no {order},m.round_no {order},m.pairing_no {order},m.id {order} LIMIT ?"
+        with self.tx() as con:
+            rows = con.execute(sql, (*args, limit + 1)).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        if reverse:
+            rows.reverse()
+        return [dict(row) for row in rows], has_more
 
     def count_match_summaries(self, tid: str) -> int:
         with self.tx() as con:

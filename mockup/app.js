@@ -320,11 +320,17 @@ async function pageTournament(id, q) {
   const renderId = routing;
   const tab = q.get('tab') || 'standings';
   const offset = Math.max(0, Number.parseInt(q.get('offset') || '0', 10) || 0);
+  const scheduleParams = new URLSearchParams({ pagination: 'keyset', limit: '100', offset: String(offset) });
+  const scheduleCursor = q.get('cursor');
+  if (scheduleCursor) {
+    scheduleParams.set('cursor', scheduleCursor);
+    scheduleParams.set('direction', q.get('direction') || 'after');
+  }
   const [t, st] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/standings`)]);
   if (renderId !== routing) return '';
   syncOffset(t.server_time);
   const sched = tab === 'pairings'
-    ? await api('GET', `/tournaments/${id}/schedule?limit=100&offset=${offset}`)
+    ? await api('GET', `/tournaments/${id}/schedule?${scheduleParams}`)
     : { matches: [], total: 0, has_more: false, limit: 100, offset };
   if (renderId !== routing) return '';
   let entry = null;
@@ -352,7 +358,7 @@ async function pageTournament(id, q) {
   const pair = Object.entries(rounds).map(([r, ms]) => `<div class="pair-round">${r}</div>${ms.map((m) => `<div class="pair-row"><span class="dim">#${m.pairing_no}</span><span><span class="dot w" style="display:inline-block;width:.8rem;height:.8rem;border-radius:50%;background:#eee;margin-right:.4rem"></span><a class="user-name" href="#/user/${esc(m.white.username)}">${esc(m.white.username)}</a></span>
       <span class="sc">${m.status === 'FINISHED' ? SCORE[m.result] : m.status === 'RUNNING' ? '<span class="tag live">LIVE</span>' : m.status === 'PAUSED' ? '<span class="tag err">Tạm dừng</span>' : '<span class="tag">Chờ</span>'}</span>
       <span class="r"><a class="user-name" href="#/user/${esc(m.black.username)}">${esc(m.black.username)}</a> <span class="dot b" style="display:inline-block;width:.8rem;height:.8rem;border-radius:50%;background:#222;border:1px solid #777;margin-left:.4rem"></span></span><span class="r"><a href="#/game/${m.id}">${m.status === 'SCHEDULED' ? '' : 'Xem'}</a></span></div>`).join('')}`).join('');
-  const pairPage = sched.total ? `<div class="row" style="padding:1rem;justify-content:center;gap:.75rem"><a class="button small ${offset === 0 ? 'disabled' : ''}" href="#/tournament/${id}?tab=pairings&offset=${Math.max(0, offset - sched.limit)}">Trước</a><span class="dim">${offset + 1}–${Math.min(offset + sched.matches.length, sched.total)} / ${sched.total}</span><a class="button small ${sched.has_more ? '' : 'disabled'}" href="#/tournament/${id}?tab=pairings&offset=${offset + sched.limit}">Tiếp</a></div>` : '';
+  const pairPage = sched.total ? `<div class="row" style="padding:1rem;justify-content:center;gap:.75rem"><a class="button small ${sched.previous_cursor ? '' : 'disabled'}" href="#/tournament/${id}?tab=pairings&offset=${Math.max(0, offset - sched.limit)}&cursor=${encodeURIComponent(sched.previous_cursor || '')}&direction=before">Trước</a><span class="dim">${offset + 1}–${Math.min(offset + sched.matches.length, sched.total)} / ${sched.total}</span><a class="button small ${sched.next_cursor ? '' : 'disabled'}" href="#/tournament/${id}?tab=pairings&offset=${offset + sched.limit}&cursor=${encodeURIComponent(sched.next_cursor || '')}&direction=after">Tiếp</a></div>` : '';
   const podium = t.status === 'FINISHED' && st.items.length >= 3 ? `<section class="box"><div class="box__title">Top 3</div><div class="podium"><div><span class="medal">🥈</span><span>${esc(st.items[1].username)}</span><small>${st.items[1].points}</small></div><div class="p1"><span class="medal">🥇</span><span>${esc(st.items[0].username)}</span><small>${st.items[0].points}</small></div><div><span class="medal">🥉</span><span>${esc(st.items[2].username)}</span><small>${st.items[2].points}</small></div></div></section>` : '';
   const fetchedAt = Date.now();
   tickMiniClocks(liveDetail, fetchedAt);
@@ -803,7 +809,13 @@ async function pageOrgManage(id, q) {
   const g = orgGuard(); if (g) return g;
   const renderId = routing;
   const offset = Math.max(0, Number.parseInt(q.get('offset') || '0', 10) || 0);
-  const [t, ent, sched] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/entries`), api('GET', `/tournaments/${id}/schedule?limit=100&offset=${offset}`)]);
+  const scheduleParams = new URLSearchParams({ pagination: 'keyset', limit: '100', offset: String(offset) });
+  const scheduleCursor = q.get('cursor');
+  if (scheduleCursor) {
+    scheduleParams.set('cursor', scheduleCursor);
+    scheduleParams.set('direction', q.get('direction') || 'after');
+  }
+  const [t, ent, sched] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/entries`), api('GET', `/tournaments/${id}/schedule?${scheduleParams}`)]);
   if (renderId !== routing) return '';
   syncOffset(t.server_time);
   const idx = ORG_STEPS.findIndex(([s]) => s === t.status);
@@ -831,7 +843,7 @@ async function pageOrgManage(id, q) {
         ${ent.items.map((e, i) => `<tr><td class="rankn">${i + 1}</td><td class="user-name">${esc(e.username)}</td><td>${entryState(e)}</td><td>${e.compile_status ? `<span class="tag ${e.compile_status === 'READY' ? 'ok' : 'err'}">${e.compile_status === 'READY' ? 'Thành công' : 'Lỗi'}</span>` : '—'}</td><td class="r">${['REGISTRATION_OPEN', 'CODING'].includes(t.status) ? `<button class="button small red" data-act="remove-entry" data-eid="${e.id}">Loại</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="dim">Chưa có thí sinh đăng ký.</td></tr>'}</tbody></table></section>
       <section class="box"><div class="box__title">Lịch & hàng đợi trận <span class="dim">${t.matches_finished}/${t.matches_total}</span></div><table class="slist"><tbody>
         ${sched.matches.map((m) => `<tr><td class="dim">L${m.leg_no}·V${m.round_no}</td><td>${esc(m.white.username)} – ${esc(m.black.username)}</td><td>${m.status === 'FINISHED' ? SCORE[m.result] : m.status === 'RUNNING' ? '<span class="tag live">LIVE</span>' : m.status === 'PAUSED' ? '<span class="tag err">Tạm dừng</span>' : '<span class="tag info">Chờ</span>'}</td><td class="r">${m.status === 'SCHEDULED' ? '' : `<a href="#/game/${m.id}">Xem</a>`}</td></tr>`).join('') || '<tr><td class="dim">Chưa sinh lịch.</td></tr>'}</tbody></table>
-        ${sched.total ? `<div class="row" style="padding:.8rem;justify-content:center;gap:.75rem"><a class="button small" href="#/organizer/manage/${id}?offset=${Math.max(0, offset - sched.limit)}">Trước</a><span class="dim">${offset + 1}–${Math.min(offset + sched.matches.length, sched.total)} / ${sched.total}</span><a class="button small" href="#/organizer/manage/${id}?offset=${offset + sched.limit}">Tiếp</a></div>` : ''}</section></div></div></div>`;
+        ${sched.total ? `<div class="row" style="padding:.8rem;justify-content:center;gap:.75rem"><a class="button small ${sched.previous_cursor ? '' : 'disabled'}" href="#/organizer/manage/${id}?offset=${Math.max(0, offset - sched.limit)}&cursor=${encodeURIComponent(sched.previous_cursor || '')}&direction=before">Trước</a><span class="dim">${offset + 1}–${Math.min(offset + sched.matches.length, sched.total)} / ${sched.total}</span><a class="button small ${sched.next_cursor ? '' : 'disabled'}" href="#/organizer/manage/${id}?offset=${offset + sched.limit}&cursor=${encodeURIComponent(sched.next_cursor || '')}&direction=after">Tiếp</a></div>` : ''}</section></div></div></div>`;
 }
 
 /* ================= Cập nhật trực tiếp (SSE) ================= */

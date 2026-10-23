@@ -710,9 +710,42 @@ class App:
                 matches = app.store.list_recent_finished_match_summaries(tid, recent)
                 return 200, {"matches": [app.summary(m) for m in matches], "byes": []}
 
+            pagination_values = query.get("pagination", ["offset"])
+            if len(pagination_values) != 1 or pagination_values[0] not in ("offset", "keyset"):
+                raise ApiError(400, "BAD_QUERY", "Invalid pagination mode.")
+            keyset = pagination_values[0] == "keyset"
+            cursor_values = query.get("cursor", [])
+            direction_values = query.get("direction", [])
+            if len(cursor_values) > 1 or len(direction_values) > 1:
+                raise ApiError(400, "BAD_QUERY", "Invalid schedule cursor.")
+            if direction_values and not cursor_values:
+                raise ApiError(400, "BAD_QUERY", "Schedule direction requires a cursor.")
+            direction = direction_values[0] if direction_values else "after"
+            if direction not in ("after", "before"):
+                raise ApiError(400, "BAD_QUERY", "Invalid schedule direction.")
+            if cursor_values and not keyset:
+                raise ApiError(400, "BAD_QUERY", "Schedule cursor requires keyset pagination.")
+
+            def parse_cursor(value: str) -> tuple[int, int, int, str]:
+                fields = value.split(",", 3)
+                if (len(value) > 256 or len(fields) != 4
+                        or any(
+                            not part.isascii() or not part.isdigit() or len(part) > 10
+                            for part in fields[:3]
+                        )
+                        or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", fields[3])):
+                    raise ApiError(400, "BAD_QUERY", "Invalid schedule cursor.")
+                numbers = tuple(int(part) for part in fields[:3])
+                if any(number < 1 for number in numbers):
+                    raise ApiError(400, "BAD_QUERY", "Invalid schedule cursor.")
+                return numbers[0], numbers[1], numbers[2], fields[3]
+
+            def format_cursor(match: dict[str, Any]) -> str:
+                return ",".join(str(match[key]) for key in ("leg_no", "round_no", "pairing_no", "id"))
+
             entries = app.store.list_entries(tid)
             entry_ids = [e["id"] for e in entries]
-            paged = "limit" in query or "offset" in query
+            paged = "limit" in query or "offset" in query or "cursor" in query or keyset
             if not paged:
                 matches = app.store.list_match_summaries(tid)
                 return 200, {"matches": [app.summary(m) for m in matches], "byes": byes(entry_ids, matches)}
@@ -720,7 +753,25 @@ class App:
             limit = query_int("limit", 100, 1, 200)
             offset = query_int("offset", 0, 0, 1_000_000_000)
             total = app.store.count_match_summaries(tid)
-            matches = app.store.list_match_summaries(tid, limit, offset)
+            cursor = parse_cursor(cursor_values[0]) if cursor_values else None
+            if keyset and cursor is None and offset:
+                # Preserve old page URLs once, then issue cursors for fast navigation.
+                matches = app.store.list_match_summaries(tid, limit, offset)
+                has_more = offset + len(matches) < total
+                previous_cursor = format_cursor(matches[0]) if matches else None
+                next_cursor = format_cursor(matches[-1]) if has_more and matches else None
+            elif keyset:
+                matches, has_more = app.store.list_match_summary_page(
+                    tid, limit, cursor=cursor, direction=direction,
+                )
+                has_previous = bool(matches) and (has_more if direction == "before" else cursor is not None)
+                has_next = bool(matches) and (cursor is not None if direction == "before" else has_more)
+                previous_cursor = format_cursor(matches[0]) if has_previous else None
+                next_cursor = format_cursor(matches[-1]) if has_next else None
+            else:
+                matches = app.store.list_match_summaries(tid, limit, offset)
+                has_more = offset + len(matches) < total
+                previous_cursor = next_cursor = None
             if len(entry_ids) % 2 and total == len(entry_ids) * (len(entry_ids) - 1):
                 bye_rows = [
                     {"leg_no": leg, "round_no": round_no, "entry_id": entry_id}
@@ -734,7 +785,7 @@ class App:
             return 200, {
                 "matches": [app.summary(m) for m in matches], "byes": bye_rows,
                 "total": total, "limit": limit, "offset": offset,
-                "has_more": offset + len(matches) < total,
+                "has_more": has_more, "previous_cursor": previous_cursor, "next_cursor": next_cursor,
             }
 
         @r("GET", "/tournaments/{tid}/standings")

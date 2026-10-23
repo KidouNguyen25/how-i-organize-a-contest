@@ -369,6 +369,24 @@ paths:
       tags: [Matches]
       summary: Xem lịch đấu
       security: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+        - name: offset
+          in: query
+          description: Offset pagination for older clients; UI uses keyset pagination.
+          schema: { type: integer, minimum: 0, maximum: 1000000000, default: 0 }
+        - name: pagination
+          in: query
+          schema: { type: string, enum: [offset, keyset], default: offset }
+        - name: cursor
+          in: query
+          description: Opaque schedule position returned as previous_cursor or next_cursor.
+          schema: { type: string, maxLength: 256 }
+        - name: direction
+          in: query
+          schema: { type: string, enum: [after, before], default: after }
       responses:
         '200':
           description: Match schedule and byes
@@ -380,6 +398,12 @@ paths:
                 properties:
                   matches: { type: array, items: { $ref: '#/components/schemas/MatchSummary' } }
                   byes: { type: array, items: { type: object, required: [round_no, entry_id], properties: { round_no: { type: integer }, entry_id: { type: string, format: uuid } } } }
+                  total: { type: integer, minimum: 0 }
+                  limit: { type: integer, minimum: 1, maximum: 200 }
+                  offset: { type: integer, minimum: 0 }
+                  has_more: { type: boolean, description: More rows exist in requested direction. }
+                  previous_cursor: { type: [string, 'null'], maxLength: 256 }
+                  next_cursor: { type: [string, 'null'], maxLength: 256 }
     post:
       tags: [Organizer]
       summary: Sinh lịch vòng tròn hai lượt sau khi khóa roster
