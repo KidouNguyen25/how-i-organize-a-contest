@@ -276,7 +276,8 @@ def legal_actions(state: dict[str, Any], side: str | None = None) -> list[Action
         ]
     out: list[Action] = []
     append = out.append
-    for origin, pc in sorted(board.items()):
+    for origin in sorted(board):
+        pc = board[origin]
         if pc["side"] == side:
             _piece_moves(board, origin, pc, append)
     return out
