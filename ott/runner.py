@@ -58,11 +58,13 @@ def ensure_binary(store: Store, data_dir: Path, bot_id: str) -> Path:
     return ensure_binary_info(store, data_dir, bot_id)[0]
 
 
-def ensure_binary_info(store: Store, data_dir: Path, bot_id: str) -> tuple[Path, str]:
+def ensure_binary_info(store: Store, data_dir: Path, bot_id: str,
+                       bot: dict[str, Any] | None = None) -> tuple[Path, str]:
     """Binary for a submitted bot; rebuild from the stored source if it is missing
     (e.g. after switching between the local and Docker runner), with verified digest."""
     exe = artifact_path(data_dir, bot_id)
-    bot = store.get_bot(bot_id, with_source=True)
+    if bot is None:
+        bot = store.get_bot(bot_id)
     if not bot:
         raise InfraError("submitted bot is missing")
     if exe.exists():
@@ -74,6 +76,8 @@ def ensure_binary_info(store: Store, data_dir: Path, bot_id: str) -> tuple[Path,
         if exe.exists():
             manifest = SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"], expected_language=bot["language"])
             return exe, manifest["binary_sha256"]
+        if "source" not in bot:
+            bot = store.get_bot(bot_id, with_source=True)
         if not bot or not bot["source"]:
             raise InfraError("binary missing and no source to rebuild it")
         owner = "rebuild-" + uuid.uuid4().hex
@@ -266,11 +270,13 @@ class MatchRunner:
                 frozen = next((entry for entry in snapshot["entries"] if entry["id"] == eid),None)
                 if not frozen or not frozen["bot_submission_id"]:
                     raise InfraError("immutable bot reference is missing")
-                bot = self.store.get_bot(frozen["bot_submission_id"],with_source=True)
+                bot = self.store.get_bot(frozen["bot_submission_id"])
                 if (not bot or bot["source_sha256"] != frozen["source_sha256"]
                         or bot["language"] != frozen.get("language", "cpp17")):
                     raise InfraError("submitted source hash or language differs from execution snapshot")
-                exes[side], artifacts[side] = ensure_binary_info(self.store,self.data_dir,frozen["bot_submission_id"])
+                exes[side], artifacts[side] = ensure_binary_info(
+                    self.store, self.data_dir, frozen["bot_submission_id"], bot,
+                )
                 languages[side] = bot["language"]
             self._check_control()
             self.store.start_execution(self.mid,self.lease,{
