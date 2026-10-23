@@ -25,6 +25,8 @@ _POSITION_ALPHABET = ".0123456789abcdefghijklmn"
 _POSITION_FILE_INDEX = {file: index for index, file in enumerate(FILES)}
 _POSITION_PIECE_INDEX = {piece: index for index, piece in enumerate(PIECES)}
 _POSITION_PROMOTION_INDEX = {None: 0, "rook": 1, "bishop": 2}
+_MOVE_ACTION_KEYS = frozenset(("type", "from", "to"))
+_PROMOTION_ACTION_KEYS = _MOVE_ACTION_KEYS | {"promotion"}
 
 Action = dict[str, Any]
 
@@ -172,6 +174,39 @@ def _piece_has_move(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> b
     return False
 
 
+def _piece_can_move_to(board: dict[str, Any], origin: str, pc: dict[str, Any], dest: str,
+                       destination: tuple[int, int]) -> bool:
+    side = pc["side"]
+    f, r = parse_sq(origin)
+    nf, nr = destination
+    dx, dy = nf - f, nr - r
+    if dx == 0 and dy == 0:
+        return False
+    target = board.get(dest)
+    if pc["piece"] == "king":
+        return (dx, dy) in EIGHT and target is None
+    if not pc["promotion"]:
+        for step_f, step_r, can_capture in _PAWN_STEPS[1 if side == "white" else -1]:
+            if step_f == dx and step_r == dy:
+                return target is None or (
+                    can_capture and target["side"] != side and _can_capture(pc, target)
+                )
+        return False
+
+    slide = ORTHO if pc["promotion"] == "rook" else DIAG
+    step = (0 if dx == 0 else (1 if dx > 0 else -1), 0 if dy == 0 else (1 if dy > 0 else -1))
+    if step in slide:
+        if dx and dy and abs(dx) != abs(dy):
+            return False
+        for offset in range(1, max(abs(dx), abs(dy))):
+            if _SQUARES[r + step[1] * offset][f + step[0] * offset] in board:
+                return False
+        return target is None or (target["side"] != side and _can_capture(pc, target))
+    return (dx, dy) in EIGHT and (dx, dy) not in slide and (
+        target is None or (target["side"] != side and _can_capture(pc, target))
+    )
+
+
 def _add(out: list[Action], origin: str, dest: str, pc: dict[str, Any], dest_rank: int) -> None:
     if pc["piece"] != "king" and not pc["promotion"] and dest_rank == last_rank(pc["side"]):
         out.append({"type": "move", "from": origin, "to": dest, "promotion": "rook"})
@@ -282,7 +317,19 @@ def validate_action(state: dict[str, Any], action: Action) -> bool:
     if action.get("type") != "move" or not isinstance(origin, str):
         return False
     piece = board.get(origin)
-    return bool(piece and piece["side"] == side and action in _piece_moves(board, origin, piece))
+    if (not piece or piece["side"] != side or action.keys() not in (_MOVE_ACTION_KEYS, _PROMOTION_ACTION_KEYS)
+            or not _is_square(action["to"])):
+        return False
+    dest = action["to"]
+    destination = parse_sq(dest)
+    nr = destination[1]
+    promotes = piece["piece"] != "king" and not piece["promotion"] and nr == last_rank(side)
+    if promotes:
+        if "promotion" not in action or action["promotion"] not in ("rook", "bishop"):
+            return False
+    elif "promotion" in action:
+        return False
+    return _piece_can_move_to(board, origin, piece, dest, destination)
 
 
 def observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int]) -> dict[str, Any]:
