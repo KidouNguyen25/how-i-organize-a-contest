@@ -11,6 +11,11 @@ import ssl
 from pathlib import Path
 from typing import Any
 
+try:
+    import orjson
+except ImportError:
+    orjson = None
+
 from judge.database import Database
 from core.languages import LANGUAGES
 from judge.judge_engine import DockerJudge, JudgeInfrastructureError
@@ -129,7 +134,13 @@ class JudgeService:
                 pass
 
     async def _send(self, writer: asyncio.StreamWriter, response: dict[str, Any]) -> None:
-        writer.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+        try:
+            payload = orjson.dumps(response) if orjson is not None else None
+        except (TypeError, ValueError, OverflowError):
+            payload = None
+        if payload is None:
+            payload = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        writer.write(payload + b"\n")
         await writer.drain()
 
     async def dispatch(
