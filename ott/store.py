@@ -1091,6 +1091,12 @@ class Store:
     _NEXT_MATCH_SQL = "SELECT m.*,t.status AS tournament_status,t.game_id,t.game_version,t.clock_seconds " + _NEXT_MATCH_FROM
     _NEXT_MATCH_EXISTS_SQL = "SELECT 1 " + _NEXT_MATCH_FROM
 
+    @staticmethod
+    def _running_capacity_reached(con: sqlite3.Connection, limit: int) -> bool:
+        return con.execute(
+            "SELECT 1 FROM matches WHERE status='RUNNING' LIMIT 1 OFFSET ?", (limit - 1,)
+        ).fetchone() is not None
+
     def _claim_row(self, con: sqlite3.Connection, row: sqlite3.Row, owner: str, stamp: int) -> Lease | None:
         mid = row["id"]
         epoch = row["lease_epoch"] + 1
@@ -1136,13 +1142,13 @@ class Store:
             raise ValueError("Worker owner and positive concurrency are required.")
         with self.tx() as con:
             stamp = self._db_now(con)
-            if con.execute("SELECT COUNT(*) FROM matches WHERE status='RUNNING'").fetchone()[0] >= max_running:
+            if self._running_capacity_reached(con, max_running):
                 return None
             if con.execute(self._NEXT_MATCH_EXISTS_SQL, (stamp, MAX_ATTEMPTS)).fetchone() is None:
                 return None
             con.execute("BEGIN IMMEDIATE")
             stamp = self._db_now(con)
-            if con.execute("SELECT COUNT(*) FROM matches WHERE status='RUNNING'").fetchone()[0] >= max_running:
+            if self._running_capacity_reached(con, max_running):
                 return None
             row = con.execute(self._NEXT_MATCH_SQL, (stamp, MAX_ATTEMPTS)).fetchone()
             if row is None:
