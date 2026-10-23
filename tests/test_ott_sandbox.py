@@ -61,7 +61,7 @@ class SandboxUnitTests(unittest.TestCase):
     def test_docker_flags_isolate_bots(self):
         sandbox = DockerSandbox("img")
         sandbox.runtime_image_id = "img"
-        with mock.patch.object(DockerSandbox, "verify_artifact", return_value={}):
+        with mock.patch.object(DockerSandbox, "verify_artifact", return_value={"language": "cpp17"}):
             args = sandbox.bot_argv(Path("/tmp/bot"), "c1")
         for flag in ("--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=256m",
                      "--memory-swap=256m", "--cpus=1", "--pids-limit=64", "--user=65534:65534"):
