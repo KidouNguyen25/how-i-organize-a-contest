@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 try:
     import orjson
@@ -146,10 +146,9 @@ def _can_capture(attacker: dict[str, Any], target: dict[str, Any]) -> bool:
     return bool(attacker["promotion"]) and attacker["piece"] == target["piece"]
 
 
-def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list[Action]:
+def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any],
+                 append: Callable[[Action], None]) -> None:
     side = pc["side"]
-    out: list[Action] = []
-    append = out.append
 
     if pc["piece"] == "king":
         for dest in _KING_TARGETS[origin]:
@@ -186,7 +185,6 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
             target = board.get(dest)
             if target is None or (target["side"] != side and _can_capture(pc, target)):
                 append({"type": "move", "from": origin, "to": dest})
-    return out
 
 
 def _piece_has_move(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> bool:
@@ -277,9 +275,10 @@ def legal_actions(state: dict[str, Any], side: str | None = None) -> list[Action
             for cell in cells
         ]
     out: list[Action] = []
+    append = out.append
     for origin, pc in sorted(board.items()):
         if pc["side"] == side:
-            out.extend(_piece_moves(board, origin, pc))
+            _piece_moves(board, origin, pc, append)
     return out
 
 
