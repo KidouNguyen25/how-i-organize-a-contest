@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from ott.runner import MatchRunner
 from ott.store import Lease, Store
@@ -78,13 +78,19 @@ def byes(entry_ids: list[str], matches: list[dict[str, Any]]) -> list[dict[str, 
     return out
 
 
-def standings(entries: list[dict[str, Any]], matches: list[dict[str, Any]], *,
+def standings(entries: list[dict[str, Any]], matches: Iterable[dict[str, Any]], *,
               matches_in_schedule_order: bool = False,
-              matches_are_finished: bool = False) -> list[dict[str, Any]]:
-    by_entry = {
-        e["id"]: {"entry_id": e["id"], "username": e["username"], "points": 0, "wins": 0, "draws": 0, "losses": 0, "played": 0, "sheet": []}
-        for e in entries
-    }
+              matches_are_finished: bool = False,
+              matches_count: int | None = None,
+              include_sheet: bool = True) -> list[dict[str, Any]]:
+    def new_row(entry: dict[str, Any]) -> dict[str, Any]:
+        row = {"entry_id": entry["id"], "username": entry["username"], "points": 0,
+               "wins": 0, "draws": 0, "losses": 0, "played": 0}
+        if include_sheet:
+            row["sheet"] = []
+        return row
+
+    by_entry = {entry["id"]: new_row(entry) for entry in entries}
     rows = list(by_entry.values())
     entry_index = {row["entry_id"]: index for index, row in enumerate(rows)}
     if matches_are_finished:
@@ -94,7 +100,8 @@ def standings(entries: list[dict[str, Any]], matches: list[dict[str, Any]], *,
     if not matches_in_schedule_order:
         finished.sort(key=lambda m: (m["leg_no"], m["round_no"], m["pairing_no"]))
     entry_count = len(rows)
-    dense_h2h = entry_count >= 32 and len(finished) >= entry_count * (entry_count - 1) // 4
+    finished_count = matches_count if matches_count is not None else len(finished)
+    dense_h2h = entry_count >= 32 and finished_count >= entry_count * (entry_count - 1) // 4
     if dense_h2h:
         # OTT double round-robin pair can score at most six points per direction.
         h2h_matrix = [bytearray(entry_count) for _ in rows]
@@ -122,8 +129,9 @@ def standings(entries: list[dict[str, Any]], matches: list[dict[str, Any]], *,
         else:
             w["losses"] += 1
             b["wins"] += 1
-        w["sheet"].append("w" if pw == 3 else "d" if pw == 1 else "l")
-        b["sheet"].append("w" if pb == 3 else "d" if pb == 1 else "l")
+        if include_sheet:
+            w["sheet"].append("w" if pw == 3 else "d" if pw == 1 else "l")
+            b["sheet"].append("w" if pb == 3 else "d" if pb == 1 else "l")
         if dense_h2h:
             h2h_matrix[white_index][black_index] += pw
             h2h_matrix[black_index][white_index] += pb

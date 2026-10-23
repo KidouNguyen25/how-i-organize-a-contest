@@ -974,10 +974,12 @@ class App:
                 games.append({"id": m["id"], "tournament_name": m["tournament_name"], "opponent": m["black_name"] if white else m["white_name"],
                               "color": "white" if white else "black", "status": m["status"], "outcome": outcome, "reason": m["result_reason"]})
             entries = []
-            with closing(app.store.iter_user_standings_inputs(u["id"], finished_matches_only=True)) as inputs:
+            with closing(app.store.iter_user_standings_inputs(
+                    u["id"], finished_matches_only=True, stream_matches=True)) as inputs:
                 for tournament in inputs:
                     rows = standings(tournament["entries"], tournament["matches"],
-                                     matches_in_schedule_order=True, matches_are_finished=True)
+                                     matches_in_schedule_order=True, matches_are_finished=True,
+                                     matches_count=tournament["matches_count"], include_sheet=False)
                     mine = next((row for row in rows if row["entry_id"] == tournament["entry_id"]), None)
                     entries.append({"tournament_id": tournament["tournament_id"], "tournament_name": tournament["tournament_name"],
                                     "status": tournament["status"], "rank": mine["rank"] if mine else None,
