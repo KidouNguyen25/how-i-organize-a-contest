@@ -377,10 +377,12 @@ def parse_action(line: str) -> Action:
     """Parse one JSON action line. Reject duplicate keys, extra keys and wrong shapes."""
 
     def no_dupes(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        keys = [k for k, _ in pairs]
-        if len(keys) != len(set(keys)):
-            raise ValueError("duplicate key")
-        return dict(pairs)
+        data: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in data:
+                raise ValueError("duplicate key")
+            data[key] = value
+        return data
 
     data = json.loads(line, object_pairs_hook=no_dupes)
     if not isinstance(data, dict):
