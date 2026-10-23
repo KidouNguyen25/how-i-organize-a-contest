@@ -454,8 +454,8 @@ paths:
       parameters:
         - name: compact
           in: query
-          description: Return top three standings rows without per-match sheets for finished tournament summaries.
-          schema: { type: string, enum: [top3] }
+          description: Return top three or six rows without per-match sheets for tournament summaries.
+          schema: { type: string, enum: [top3, top6] }
       responses:
         '200':
           description: Standings calculated from completed matches

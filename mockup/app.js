@@ -255,7 +255,7 @@ async function pageHome() {
   const [ts, live, stats] = await Promise.all([api('GET', '/tournaments'), api('GET', '/live'), api('GET', '/stats')]);
   if (renderId !== routing) return '';
   const feat = featuredTournament(ts.items);
-  const st = feat ? await api('GET', `/tournaments/${feat.id}/standings`) : { items: [] };
+  const st = feat ? await api('GET', `/tournaments/${feat.id}/standings?compact=top6`) : { items: [] };
   if (renderId !== routing) return '';
   let myEntry = null;
   if (feat && isContestant()) { try { myEntry = await api('GET', `/tournaments/${feat.id}/entry`); } catch { /* chưa đăng ký */ } }
