@@ -59,12 +59,12 @@ SIGTERM/Ctrl+C ngừng nhận việc và chờ writer kết thúc trước khi n
 
 ## Gateway Cloudflare
 
-`cloudflare/worker.mjs` chỉ phục vụ assets và chuyển API allowlist. Đích chỉ nhận hostname Quick Tunnel. Không dùng SSE, không cache API hoặc theo redirect upstream. Gateway không chạy mã thí sinh.
+`cloudflare/src/worker.js` cùng `cloudflare/wrangler.toml` là cấu hình BFF có unit test ở `cloudflare/test/worker.test.mjs`. Repository vẫn có cặp `cloudflare/worker.mjs` + `cloudflare/wrangler.jsonc` cũ với allowlist khác; **không dùng lẫn hai cấu hình** và luôn truyền `--config wrangler.toml` khi triển khai bản BFF đã đối chiếu. Gateway chỉ phục vụ assets và proxy API allowlist tới Quick Tunnel; không dùng SSE, không cache API, không theo redirect upstream và không chạy mã thí sinh.
 
 1. Tạo secret ngẫu nhiên mạnh từ 32 ký tự ASCII trở lên. Đặt cùng giá trị tại backend `CONTEST_ORIGIN_KEY` và Wrangler secret `ORIGIN_KEY`. Không dùng giá trị placeholder.
 2. Đặt `CONTEST_PUBLIC_ORIGIN` ở backend; cập nhật `PUBLIC_ORIGIN` trong Wrangler bằng public origin thực, không có dấu `/` cuối.
 3. Mở Quick Tunnel tới `http://127.0.0.1:8080`; cập nhật `ORIGIN_URL` trong Wrangler.
-4. Dùng `npx wrangler secret put ORIGIN_KEY --config deploy/cloudflare/wrangler.jsonc`. Việc publish Worker là bước vận hành riêng.
+4. Trong thư mục `deploy/cloudflare`, dùng `npx wrangler secret put ORIGIN_KEY --config wrangler.toml` và `npx wrangler deploy --config wrangler.toml`. Không coi deploy là thành công trước khi smoke staging có cả W/O/A và có bản ghi kiểm chứng.
 5. Khi đổi Tunnel URL, chỉ cập nhật `ORIGIN_URL`; frontend vẫn gọi cùng public origin.
 
 Origin key bảo vệ mọi route origin. Session, quyền và CSRF vẫn được kiểm riêng. `CONTEST_ORIGIN_KEY_PREVIOUS` hỗ trợ xoay key trong cửa sổ ngắn. Secret không nằm trong browser bundle, URL hoặc manifest release.
