@@ -21,6 +21,45 @@ _PAWN_STEPS = {
     1: ((0, 1, True), (-1, 1, True), (1, 1, True), (-1, -1, False), (1, -1, False)),
     -1: ((0, -1, True), (-1, -1, True), (1, -1, True), (-1, 1, False), (1, 1, False)),
 }
+
+
+def _build_move_tables():
+    king_targets = {}
+    pawn_targets = {direction: {} for direction in _PAWN_STEPS}
+    promoted_rays = {"rook": {}, "bishop": {}}
+    promoted_steps = {"rook": {}, "bishop": {}}
+    for origin, (file, rank) in _SQUARE_COORDINATES.items():
+        king_targets[origin] = tuple(
+            _SQUARES[rank + dy][file + dx]
+            for dx, dy in EIGHT
+            if 0 <= file + dx < 9 and 0 <= rank + dy < 9
+        )
+        for direction, steps in _PAWN_STEPS.items():
+            pawn_targets[direction][origin] = tuple(
+                (_SQUARES[rank + dy][file + dx], rank + dy, can_capture)
+                for dx, dy, can_capture in steps
+                if 0 <= file + dx < 9 and 0 <= rank + dy < 9
+            )
+        for promotion, directions in (("rook", ORTHO), ("bishop", DIAG)):
+            rays = []
+            for dx, dy in directions:
+                ray = []
+                next_file, next_rank = file + dx, rank + dy
+                while 0 <= next_file < 9 and 0 <= next_rank < 9:
+                    ray.append(_SQUARES[next_rank][next_file])
+                    next_file += dx
+                    next_rank += dy
+                rays.append(tuple(ray))
+            promoted_rays[promotion][origin] = tuple(rays)
+            promoted_steps[promotion][origin] = tuple(
+                _SQUARES[rank + dy][file + dx]
+                for dx, dy in EIGHT
+                if (dx, dy) not in directions and 0 <= file + dx < 9 and 0 <= rank + dy < 9
+            )
+    return king_targets, pawn_targets, promoted_rays, promoted_steps
+
+
+_KING_TARGETS, _PAWN_TARGETS, _PROMOTED_RAYS, _PROMOTED_STEPS = _build_move_tables()
 _POSITION_ALPHABET = ".0123456789abcdefghijklmn"
 _POSITION_PIECE_INDEX = {piece: index for index, piece in enumerate(PIECES)}
 _POSITION_PROMOTION_INDEX = {None: 0, "rook": 1, "bishop": 2}
@@ -104,24 +143,16 @@ def _can_capture(attacker: dict[str, Any], target: dict[str, Any]) -> bool:
 
 def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list[Action]:
     side = pc["side"]
-    f, r = parse_sq(origin)
     out: list[Action] = []
     append = out.append
 
     if pc["piece"] == "king":
-        for dx, dy in EIGHT:
-            nf, nr = f + dx, r + dy
-            if 0 <= nf < 9 and 0 <= nr < 9:
-                dest = _SQUARES[nr][nf]
-                if dest not in board:
-                    append({"type": "move", "from": origin, "to": dest})
+        for dest in _KING_TARGETS[origin]:
+            if dest not in board:
+                append({"type": "move", "from": origin, "to": dest})
     elif not pc["promotion"]:
         promotion_rank = 8 if side == "white" else 0
-        for dx, dy, can_capture in _PAWN_STEPS[1 if side == "white" else -1]:
-            nf, nr = f + dx, r + dy
-            if nf < 0 or nf >= 9 or nr < 0 or nr >= 9:
-                continue
-            dest = _SQUARES[nr][nf]
+        for dest, nr, can_capture in _PAWN_TARGETS[1 if side == "white" else -1][origin]:
             target = board.get(dest)
             if target is None:
                 if nr == promotion_rank:
@@ -136,29 +167,20 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
                 else:
                     append({"type": "move", "from": origin, "to": dest})
     else:
-        slide = ORTHO if pc["promotion"] == "rook" else DIAG
-        for dx, dy in slide:
-            nf, nr = f + dx, r + dy
-            while 0 <= nf < 9 and 0 <= nr < 9:
-                dest = _SQUARES[nr][nf]
+        promotion = "rook" if pc["promotion"] == "rook" else "bishop"
+        for ray in _PROMOTED_RAYS[promotion][origin]:
+            for dest in ray:
                 target = board.get(dest)
                 if target is None:
                     append({"type": "move", "from": origin, "to": dest})
-                    nf += dx
-                    nr += dy
                     continue
                 if target["side"] != side and _can_capture(pc, target):
                     append({"type": "move", "from": origin, "to": dest})
                 break
-        for dx, dy in EIGHT:
-            if (dx, dy) not in slide:
-                nf, nr = f + dx, r + dy
-                if nf < 0 or nf >= 9 or nr < 0 or nr >= 9:
-                    continue
-                dest = _SQUARES[nr][nf]
-                target = board.get(dest)
-                if target is None or (target["side"] != side and _can_capture(pc, target)):
-                    append({"type": "move", "from": origin, "to": dest})
+        for dest in _PROMOTED_STEPS[promotion][origin]:
+            target = board.get(dest)
+            if target is None or (target["side"] != side and _can_capture(pc, target)):
+                append({"type": "move", "from": origin, "to": dest})
     return out
 
 
