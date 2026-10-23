@@ -111,7 +111,7 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
     if pc["piece"] == "king":
         for dx, dy in EIGHT:
             nf, nr = f + dx, r + dy
-            if in_board(nf, nr):
+            if 0 <= nf < 9 and 0 <= nr < 9:
                 dest = _SQUARES[nr][nf]
                 if dest not in board:
                     append({"type": "move", "from": origin, "to": dest})
@@ -119,7 +119,7 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
         promotion_rank = 8 if side == "white" else 0
         for dx, dy, can_capture in _PAWN_STEPS[1 if side == "white" else -1]:
             nf, nr = f + dx, r + dy
-            if not in_board(nf, nr):
+            if nf < 0 or nf >= 9 or nr < 0 or nr >= 9:
                 continue
             dest = _SQUARES[nr][nf]
             target = board.get(dest)
@@ -139,7 +139,7 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
         slide = ORTHO if pc["promotion"] == "rook" else DIAG
         for dx, dy in slide:
             nf, nr = f + dx, r + dy
-            while in_board(nf, nr):
+            while 0 <= nf < 9 and 0 <= nr < 9:
                 dest = _SQUARES[nr][nf]
                 target = board.get(dest)
                 if target is None:
@@ -153,7 +153,7 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
         for dx, dy in EIGHT:
             if (dx, dy) not in slide:
                 nf, nr = f + dx, r + dy
-                if not in_board(nf, nr):
+                if nf < 0 or nf >= 9 or nr < 0 or nr >= 9:
                     continue
                 dest = _SQUARES[nr][nf]
                 target = board.get(dest)
