@@ -16,6 +16,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import zlib
 from collections import OrderedDict
 from contextlib import closing, contextmanager
 from http.cookies import SimpleCookie
@@ -432,20 +433,33 @@ class App:
                 version = m.get("state_version")
                 view = self.cached_view(m, with_moves=with_moves)
             state_json = m.get("state_json")
+            state_zlib = m.get("state_zlib")
         else:
             state_json = None
+            state_zlib = None
         if view is None:
-            state = json.loads(state_json) if state_json else None
+            state_bytes = zlib.decompress(state_zlib) if state_zlib is not None else None
+            if state_bytes is not None:
+                state = json.loads(state_bytes)
+                weight = len(state_bytes)
+                has_state = True
+            elif state_json:
+                state = json.loads(state_json)
+                weight = len(state_json.encode("utf-8"))
+                has_state = True
+            else:
+                state = None
+                weight = 0
+                has_state = False
             public_view = get_adapter(m["game_id"], m["game_version"]).public_view(state)
             if with_moves:
                 view = public_view
-                weight = len(state_json) if state_json else 0
             else:
                 moves = public_view.get("moves", [])
                 view = {key: value for key, value in public_view.items() if key != "moves"}
                 view["last_move"] = {"from": moves[-1]["from"], "to": moves[-1]["to"]} if moves else None
                 weight = len(json.dumps(view, separators=(",", ":")).encode("utf-8"))
-            if state_json and type(version) is int and weight <= MATCH_VIEW_CACHE_MAX_STATE:
+            if has_state and type(version) is int and weight <= MATCH_VIEW_CACHE_MAX_STATE:
                 view = self.match_view_cache.put(m["id"], m["game_id"], m["game_version"], version, view, weight,
                                                  with_moves=with_moves)
         view = dict(view)

@@ -832,7 +832,11 @@ class Store:
         "t.game_id, t.game_version, wu.username AS white_name, bu.username AS black_name "
     )
     _MATCH_OVERVIEW_SQL = "SELECT " + _MATCH_OVERVIEW_COLUMNS + _MATCH_FROM_SQL
-    _MATCH_RENDER_SQL = "SELECT " + _MATCH_OVERVIEW_COLUMNS + ", m.state_json " + _MATCH_FROM_SQL
+    _MATCH_RENDER_SQL = (
+        "SELECT " + _MATCH_OVERVIEW_COLUMNS + ", m.state_json, "
+        "me.state_after_zlib AS state_zlib " + _MATCH_FROM_SQL +
+        "LEFT JOIN match_events me ON me.match_id=m.id AND me.sequence_no=m.last_event_seq "
+    )
     _MATCH_SUMMARY_COLUMNS = (
         "m.id, m.tournament_id, m.round_no, m.leg_no, m.pairing_no, "
         "m.white_entry_id, m.black_entry_id, m.status, m.result, m.result_reason, "
@@ -1222,8 +1226,8 @@ class Store:
             # Keep the legacy NOT NULL column empty; new snapshots use compact zlib bytes.
             con.execute("INSERT INTO match_events(match_id,sequence_no,phase,side,action_json,state_after_json,state_after_zlib,white_clock_ms,black_clock_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (mid,seq,phase.upper(),side.upper(),encoded,"",compressed_state,int(clocks["white"]),int(clocks["black"]),stamp))
-            con.execute("UPDATE matches SET state_json=?,phase=?,side_to_act=?,move_count=?,white_clock_ms=?,black_clock_ms=?,clock_checkpoint_at=?,updated_at=?,last_event_seq=?,state_version=state_version+1 WHERE id=?",
-                        (serialized,state["phase"].upper(),state["side"].upper(),state["move_count"],int(clocks["white"]),int(clocks["black"]),stamp,stamp,seq,mid))
+            con.execute("UPDATE matches SET state_json='',phase=?,side_to_act=?,move_count=?,white_clock_ms=?,black_clock_ms=?,clock_checkpoint_at=?,updated_at=?,last_event_seq=?,state_version=state_version+1 WHERE id=?",
+                        (state["phase"].upper(),state["side"].upper(),state["move_count"],int(clocks["white"]),int(clocks["black"]),stamp,stamp,seq,mid))
         HUB.publish("match",mid,tid=row["tournament_id"],status="RUNNING",move_count=state["move_count"],phase=state["phase"])
 
     def save_state(self, mid: str, state: dict[str, Any], clocks: dict[str, int], *, lease: Lease) -> None:
