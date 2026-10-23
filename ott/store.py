@@ -1162,9 +1162,14 @@ class Store:
 
     def heartbeat(self, mid: str, lease: Lease) -> None:
         with self.tx() as con:
-            con.execute("BEGIN IMMEDIATE")
-            self._owned(con,mid,lease)
-            con.execute("UPDATE matches SET lease_expires_at=? WHERE id=?", (self._db_now(con)+LEASE_SECONDS,mid))
+            updated = con.execute(
+                "UPDATE matches SET lease_expires_at=CAST(strftime('%s','now') AS INTEGER)+? "
+                "WHERE id=? AND status='RUNNING' AND lease_owner=? AND lease_epoch=? "
+                "AND lease_expires_at>CAST(strftime('%s','now') AS INTEGER)",
+                (LEASE_SECONDS, mid, lease.owner, lease.epoch),
+            ).rowcount
+            if updated != 1:
+                raise LeaseLost("Execution lease expired or was replaced.")
 
     def start_execution(self, mid: str, lease: Lease, runtime: dict[str, Any]) -> None:
         with self.tx() as con:
