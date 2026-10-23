@@ -271,7 +271,9 @@ class Database:
     def get_submission(self, user_id: int, submission_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM submissions WHERE id = ? AND user_id = ?",
+                """SELECT id, problem_id, language, status, verdict, score, test_results_json,
+                          message, created_at, updated_at
+                   FROM submissions WHERE id = ? AND user_id = ?""",
                 (submission_id, user_id),
             ).fetchone()
         return self._submission_dict(row) if row else None
@@ -279,7 +281,9 @@ class Database:
     def list_submissions(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM submissions WHERE user_id = ? ORDER BY rowid DESC LIMIT ?",
+                """SELECT id, problem_id, language, status, verdict, score, test_results_json,
+                          message, created_at, updated_at
+                   FROM submissions WHERE user_id = ? ORDER BY rowid DESC LIMIT ?""",
                 (user_id, limit),
             ).fetchall()
         return [self._submission_dict(row) for row in rows]
