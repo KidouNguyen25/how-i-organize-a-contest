@@ -190,40 +190,29 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any],
 def _piece_has_move(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> bool:
     """Check terminal state without allocating every legal action for a piece."""
     side = pc["side"]
-    f, r = parse_sq(origin)
     if pc["piece"] == "king":
-        for dx, dy in EIGHT:
-            nf, nr = f + dx, r + dy
-            if in_board(nf, nr) and _SQUARES[nr][nf] not in board:
+        for dest in _KING_TARGETS[origin]:
+            if dest not in board:
                 return True
         return False
     if not pc["promotion"]:
-        for dx, dy, can_capture in _PAWN_STEPS[1 if side == "white" else -1]:
-            nf, nr = f + dx, r + dy
-            if not in_board(nf, nr):
-                continue
-            target = board.get(_SQUARES[nr][nf])
+        for dest, _, can_capture in _PAWN_TARGETS[1 if side == "white" else -1][origin]:
+            target = board.get(dest)
             if target is None or (target["side"] != side and can_capture and _can_capture(pc, target)):
                 return True
         return False
 
-    slide = ORTHO if pc["promotion"] == "rook" else DIAG
-    for dx, dy in slide:
-        nf, nr = f + dx, r + dy
-        while in_board(nf, nr):
-            target = board.get(_SQUARES[nr][nf])
+    promotion = "rook" if pc["promotion"] == "rook" else "bishop"
+    for ray in _PROMOTED_RAYS[promotion][origin]:
+        for dest in ray:
+            target = board.get(dest)
             if target is None:
                 return True
             if target["side"] != side and _can_capture(pc, target):
                 return True
             break
-    for dx, dy in EIGHT:
-        if (dx, dy) in slide:
-            continue
-        nf, nr = f + dx, r + dy
-        if not in_board(nf, nr):
-            continue
-        target = board.get(_SQUARES[nr][nf])
+    for dest in _PROMOTED_STEPS[promotion][origin]:
+        target = board.get(dest)
         if target is None or (target["side"] != side and _can_capture(pc, target)):
             return True
     return False
