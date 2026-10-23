@@ -15,7 +15,7 @@ import zlib
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from itertools import chain, groupby
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -486,9 +486,16 @@ class Store:
         """Yield each tournament's roster and results from three queries in one read snapshot."""
         with self.tx() as con:
             con.execute("BEGIN")
+            match_count_projection = (
+                ",(SELECT COUNT(*) FROM matches mc WHERE mc.tournament_id=mine.tournament_id"
+                + (" AND mc.status='FINISHED'" if finished_matches_only else "")
+                + ") AS matches_count"
+                if stream_matches else ""
+            )
             tournaments = con.execute(
                 "SELECT mine.id AS entry_id,mine.tournament_id,t.name AS tournament_name,t.status,b.compile_status "
-                "FROM entries mine JOIN tournaments t ON t.id=mine.tournament_id "
+                + match_count_projection + " "
+                + "FROM entries mine JOIN tournaments t ON t.id=mine.tournament_id "
                 "LEFT JOIN bot_submissions b ON b.id=mine.bot_submission_id "
                 "WHERE mine.user_id=? AND mine.status<>'REMOVED' ORDER BY mine.status,mine.tournament_id",
                 (user_id,),
@@ -503,13 +510,9 @@ class Store:
                 (user_id,),
             )
             finished_filter = " AND m.status='FINISHED'" if finished_matches_only else ""
-            match_count_column = (
-                ",COUNT(*) OVER (PARTITION BY m.tournament_id) AS tournament_match_count"
-                if stream_matches else ""
-            )
             results_cursor = con.execute(
                 "SELECT m.id,m.tournament_id,m.round_no,m.leg_no,m.pairing_no,m.white_entry_id,m.black_entry_id,m.status,m.result "
-                + match_count_column + " FROM entries mine JOIN matches m ON m.tournament_id=mine.tournament_id "
+                + "FROM entries mine JOIN matches m ON m.tournament_id=mine.tournament_id "
                 "WHERE mine.user_id=? AND mine.status<>'REMOVED'" + finished_filter + " "
                 "ORDER BY mine.status,mine.tournament_id,m.leg_no,m.round_no,m.pairing_no",
                 (user_id,),
@@ -521,25 +524,18 @@ class Store:
             for tournament in tournaments:
                 tid = tournament["tournament_id"]
                 entries, matches = [], []
-                matches_count = 0
                 advance_results_after_yield = False
                 if roster_group[0] == tid:
                     entries = [dict(row) for row in roster_group[1]]
                     roster_group = next(rosters, (None, ()))
                 if result_group[0] == tid:
                     if stream_matches:
-                        match_rows = result_group[1]
-                        first_match = next(match_rows, None)
-                        if first_match is not None:
-                            matches_count = first_match["tournament_match_count"]
-                            matches = chain((first_match,), match_rows)
+                        matches = result_group[1]
                         advance_results_after_yield = True
                     else:
                         matches = [dict(row) for row in result_group[1]]
                         result_group = next(results, (None, ()))
                 result = dict(tournament) | {"entries": entries, "matches": matches}
-                if stream_matches:
-                    result["matches_count"] = matches_count
                 yield result
                 if advance_results_after_yield:
                     result_group = next(results, (None, ()))
