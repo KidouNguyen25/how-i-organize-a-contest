@@ -8,6 +8,7 @@ from typing import Any
 FILES = "abcdefghi"
 _SQUARES = tuple(tuple(f"{FILES[file]}{rank + 1}" for file in range(9)) for rank in range(9))
 _SQUARE_COORDINATES = {square: (file, rank) for rank, row in enumerate(_SQUARES) for file, square in enumerate(row)}
+_HOME_SQUARES = {"white": _SQUARES[0] + _SQUARES[1], "black": _SQUARES[7] + _SQUARES[8]}
 PIECES = ("scissors", "hammer", "paper", "king")
 BEATS = {"scissors": "paper", "paper": "hammer", "hammer": "scissors"}
 START_COUNTS = {"scissors": 3, "hammer": 3, "paper": 3, "king": 1}
@@ -141,7 +142,7 @@ def legal_actions(state: dict[str, Any], side: str | None = None) -> list[Action
     side = side or state["side"]
     board = state["board"]
     if state["phase"] == "placement":
-        cells = [_SQUARES[r][f] for r in home_rows(side) for f in range(9) if _SQUARES[r][f] not in board]
+        cells = [square for square in _HOME_SQUARES[side] if square not in board]
         remaining = state["remaining"][side]
         return [
             {"type": "place", "piece": piece, "to": cell}
