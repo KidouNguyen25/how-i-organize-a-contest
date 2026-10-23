@@ -43,6 +43,7 @@ _POSITION_SYMBOLS = {
     }
     for side in ("white", "black")
 }
+_PLACE_ACTION_KEYS = frozenset(("type", "piece", "to"))
 _MOVE_ACTION_KEYS = frozenset(("type", "from", "to"))
 _PROMOTION_ACTION_KEYS = _MOVE_ACTION_KEYS | {"promotion"}
 
@@ -388,12 +389,16 @@ def parse_action(line: str) -> Action:
     if not isinstance(data, dict):
         raise ValueError("action must be an object")
     kind = data.get("type")
+    keys = data.keys()
     if kind == "place":
-        if set(data) != {"type", "piece", "to"} or data["piece"] not in PIECES or not _is_square(data["to"]):
+        if keys != _PLACE_ACTION_KEYS or data["piece"] not in PIECES or not _is_square(data["to"]):
             raise ValueError("bad place action")
     elif kind == "move":
-        extra = set(data) - {"type", "from", "to", "promotion"}
-        if extra or not {"type", "from", "to"} <= set(data) or not _is_square(data["from"]) or not _is_square(data["to"]):
+        if (
+            (keys != _MOVE_ACTION_KEYS and keys != _PROMOTION_ACTION_KEYS)
+            or not _is_square(data["from"])
+            or not _is_square(data["to"])
+        ):
             raise ValueError("bad move action")
         if "promotion" in data and data["promotion"] not in ("rook", "bishop"):
             raise ValueError("bad promotion")
