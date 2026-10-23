@@ -196,15 +196,57 @@ function standingsMini(rows, n = 6) {
 function sheetHTML(sheet) {
   return `<span class="sheet">${sheet.map((c) => `<b class="${c}">${{ w: 3, d: 1, l: 0 }[c]}</b>`).join('') || '<span class="dim">—</span>'}</span>`;
 }
-function tickMiniClocks(items, fetchedAt) {
-  const byId = Object.fromEntries(items.map((m) => [m.id, m]));
-  every(500, () => {
-    $$('[data-mclock]').forEach((n) => {
-      const [id, side] = n.dataset.mclock.split(':'); const m = byId[id]; if (!m) return;
-      const base = m.clocks_ms[side];
-      n.textContent = fmtClock(m.running_side === side ? base - (Date.now() - fetchedAt) : base);
-    });
+const MINI_CLOCKS = { byId: {}, fetchedAt: 0 };
+const LIVE_WIDGETS = { ids: '', moves: '', fetching: false, pending: false };
+const liveIds = (items) => items.map((m) => m.id).join('|');
+const liveMoves = (items) => items.map((m) => `${m.id}:${m.move_count}`).join('|');
+function paintMiniClocks() {
+  $$('[data-mclock]').forEach((n) => {
+    const [id, side] = n.dataset.mclock.split(':'); const m = MINI_CLOCKS.byId[id]; if (!m) return;
+    const base = m.clocks_ms[side];
+    n.textContent = fmtClock(m.running_side === side ? base - (Date.now() - MINI_CLOCKS.fetchedAt) : base);
   });
+}
+function setMiniClockData(items, fetchedAt) {
+  MINI_CLOCKS.byId = Object.fromEntries(items.map((m) => [m.id, m]));
+  MINI_CLOCKS.fetchedAt = fetchedAt;
+  paintMiniClocks();
+}
+function tickMiniClocks(items, fetchedAt) {
+  setMiniClockData(items, fetchedAt);
+  every(500, paintMiniClocks);
+}
+function renderLiveWidgets(items) {
+  LIVE_WIDGETS.ids = liveIds(items);
+  LIVE_WIDGETS.moves = liveMoves(items);
+  const home = $('#home-live-cards');
+  if (home) home.innerHTML = items.length
+    ? `<div class="mini-grid">${items.slice(0, 6).map(miniGameHTML).join('')}</div>`
+    : '<div class="box box-pad dim">Chưa có ván nào đang diễn ra.</div>';
+  const tv = $('#home-tv-game');
+  if (tv && items.length) tv.innerHTML = miniGameHTML(items[0]);
+  const watch = $('#watch-live-cards');
+  if (watch) watch.innerHTML = items.length
+    ? `<div class="mini-grid c4">${items.map(miniGameHTML).join('')}</div>`
+    : '<div class="box box-pad dim">Chưa có ván nào đang diễn ra. Ván xuất hiện ở đây khi organizer bắt đầu giải.</div>';
+  const count = $('#watch-live-count');
+  if (count) { count.textContent = `${items.length} ván`; count.classList.toggle('live', items.length > 0); }
+  setMiniClockData(items, Date.now());
+}
+async function refreshLiveWidgets() {
+  if (LIVE_WIDGETS.fetching) { LIVE_WIDGETS.pending = true; return; }
+  LIVE_WIDGETS.fetching = true;
+  try {
+    do {
+      LIVE_WIDGETS.pending = false;
+      const renderId = routing;
+      const live = await api('GET', '/live');
+      if (renderId !== routing) return;
+      if (liveIds(live.items) !== LIVE_WIDGETS.ids) { route(true); return; }
+      renderLiveWidgets(live.items);
+    } while (LIVE_WIDGETS.pending);
+  } catch { /* next event or fallback poll refreshes */ }
+  finally { LIVE_WIDGETS.fetching = false; }
 }
 
 /* ================= Trang chủ ================= */
@@ -233,8 +275,18 @@ async function pageHome() {
       <div><h2>${feat.status === 'RUNNING' ? '<span class="pulse"></span>' : ''}${esc(feat.name)}</h2><p>${esc(sub)}</p></div><span class="spacer"></span>${cta}</a>`;
   }
   const tv = liveItems[0];
+  LIVE_WIDGETS.ids = liveIds(liveItems);
+  LIVE_WIDGETS.moves = liveMoves(liveItems);
   tickMiniClocks(liveItems, fetchedAt);
-  poll(3000, async () => { if (renderId !== routing || LIVE.ok) return; try { const l = await api('GET', '/live'); if (renderId === routing && l.items.map((x) => x.id + x.move_count).join() !== liveItems.map((x) => x.id + x.move_count).join()) route(true); } catch { /* bỏ qua */ } });
+  poll(3000, async () => {
+    if (renderId !== routing || LIVE.ok) return;
+    try {
+      const l = await api('GET', '/live');
+      if (renderId !== routing) return;
+      if (liveIds(l.items) !== LIVE_WIDGETS.ids) route(true);
+      else if (liveMoves(l.items) !== LIVE_WIDGETS.moves) renderLiveWidgets(l.items);
+    } catch { /* bỏ qua */ }
+  });
   return `<div class="page"><div class="lobby">
     <div class="lobby__col left">
       <section class="box">${S.me ? `<div class="box__title">Xin chào, ${esc(S.me.username)}</div><div class="lobby-actions" style="padding-top:1rem">
@@ -244,11 +296,11 @@ async function pageHome() {
     </div>
     <div class="lobby__col mid">${banner}
       <section aria-label="Các ván đang diễn ra"><div class="row" style="margin-bottom:.7rem"><h2 style="font-size:1.25rem">Ván đang diễn ra</h2><span class="spacer"></span><a href="#/watch">Xem tất cả »</a></div>
-        ${liveItems.length ? `<div class="mini-grid">${liveItems.slice(0, 6).map(miniGameHTML).join('')}</div>` : '<div class="box box-pad dim">Chưa có ván nào đang diễn ra.</div>'}</section>
+        <div id="home-live-cards">${liveItems.length ? `<div class="mini-grid">${liveItems.slice(0, 6).map(miniGameHTML).join('')}</div>` : '<div class="box box-pad dim">Chưa có ván nào đang diễn ra.</div>'}</div></section>
     </div>
     <div class="lobby__col right">
       <section class="box"><div class="counters"><span><b>${stats.users}</b> tài khoản</span><span><b>${stats.running_matches}</b> ván đang chơi</span></div></section>
-      ${tv ? `<section class="box tv-box"><div class="box__title" style="padding:.3rem .3rem .6rem;border:0">OTT TV <a href="#/game/${tv.id}">Xem »</a></div>${miniGameHTML(tv)}</section>` : ''}
+      ${tv ? `<section class="box tv-box"><div class="box__title" style="padding:.3rem .3rem .6rem;border:0">OTT TV <a href="#/game/${tv.id}">Xem »</a></div><div id="home-tv-game">${miniGameHTML(tv)}</div></section>` : ''}
       <section class="box"><div class="box__title">Bảng xếp hạng ${feat ? `<a href="#/tournament/${feat.id}">Đầy đủ »</a>` : ''}</div>${standingsMini(st.items)}</section>
     </div></div></div>`;
 }
@@ -452,12 +504,21 @@ async function pageWatch() {
   const feat = featuredTournament(ts.items);
   const recent = feat ? (await api('GET', `/tournaments/${feat.id}/schedule?recent=12`)).matches.reverse() : [];
   if (renderId !== routing) return '';
+  LIVE_WIDGETS.ids = liveIds(live.items);
+  LIVE_WIDGETS.moves = liveMoves(live.items);
   tickMiniClocks(live.items, Date.now());
-  const sig = (items) => items.map((x) => x.id + x.move_count).join();
-  poll(4000, async () => { if (renderId !== routing || LIVE.ok) return; try { const l = await api('GET', '/live'); if (renderId === routing && sig(l.items) !== sig(live.items)) route(true); } catch { /* bỏ qua */ } });
+  poll(4000, async () => {
+    if (renderId !== routing || LIVE.ok) return;
+    try {
+      const l = await api('GET', '/live');
+      if (renderId !== routing) return;
+      if (liveIds(l.items) !== LIVE_WIDGETS.ids) route(true);
+      else if (liveMoves(l.items) !== LIVE_WIDGETS.moves) renderLiveWidgets(l.items);
+    } catch { /* bỏ qua */ }
+  });
   return `<div class="page"><div class="stack">
-    <section class="box"><div class="box__top"><h1>Ván đang diễn ra</h1><span class="tag ${live.items.length ? 'live' : ''}">${live.items.length} ván</span></div></section>
-    ${live.items.length ? `<div class="mini-grid c4">${live.items.map(miniGameHTML).join('')}</div>` : '<div class="box box-pad dim">Chưa có ván nào đang diễn ra. Ván xuất hiện ở đây khi organizer bắt đầu giải.</div>'}
+    <section class="box"><div class="box__top"><h1>Ván đang diễn ra</h1><span id="watch-live-count" class="tag ${live.items.length ? 'live' : ''}">${live.items.length} ván</span></div></section>
+    <div id="watch-live-cards">${live.items.length ? `<div class="mini-grid c4">${live.items.map(miniGameHTML).join('')}</div>` : '<div class="box box-pad dim">Chưa có ván nào đang diễn ra. Ván xuất hiện ở đây khi organizer bắt đầu giải.</div>'}</div>
     ${recent.length ? `<section class="box"><div class="box__title">Ván vừa kết thúc · ${esc(feat.name)}</div><table class="slist"><tbody>${recent.map((m) => `<tr><td>${esc(m.white.username)}</td><td>${SCORE[m.result]}</td><td>${esc(m.black.username)}</td><td class="dim">${REASONS[m.result_reason] || ''}</td><td class="r"><a href="#/game/${m.id}">Xem lại</a></td></tr>`).join('')}</tbody></table></section>` : ''}
   </div></div>`;
 }
@@ -794,7 +855,7 @@ function onLiveEvent(ev) {
   if (k === 'organizer' && PAGE.id === 'new') return;
   if (k === 'login' || k === 'register' || k === 'rules') return;
   if (ev.type === 'hello') { softRefresh(0); return; }
-  const slow = ev.type === 'match' && ev.move_count !== undefined; // chỉ là nước đi mới: làm mới thưa hơn
+  const slow = ev.type === 'match' && ev.move_count !== undefined;
   if (k === 'tournament') {
     if (tid !== PAGE.id) return;
     if (ev.type === 'match' && ev.move_count !== undefined) return; // standings change only when match status changes
@@ -805,7 +866,11 @@ function onLiveEvent(ev) {
     if (ev.type === 'match' && ev.move_count !== undefined) return;
     softRefresh(300); return;
   }
-  softRefresh(slow ? 1500 : 300); // home, danh sách giải, xem nhiều ván, bot, hồ sơ
+  if (slow) {
+    if (k === '' || (k === 'watch' && !PAGE.id)) refreshLiveWidgets();
+    return;
+  }
+  softRefresh(300);
 }
 function connectStream() {
   if (TUNNEL) { // Quick Tunnel không hỗ trợ SSE: dùng polling định kỳ
