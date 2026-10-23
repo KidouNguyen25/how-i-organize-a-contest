@@ -52,14 +52,21 @@ def round_robin(entry_ids: list[str]) -> list[dict[str, Any]]:
     return list(iter_round_robin(entry_ids))
 
 
-def byes(entry_ids: list[str], matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def byes(entry_ids: list[str], matches: Iterable[Any], *, matches_count: int | None = None) -> list[dict[str, Any]]:
     team_count = len(entry_ids)
-    if team_count % 2 == 0 or not matches:
+    if team_count % 2 == 0:
+        return []
+    if matches_count is None:
+        try:
+            matches_count = len(matches)  # type: ignore[arg-type]
+        except TypeError:
+            pass
+    if matches_count == 0:
         return []
 
     # create_matches stores the full double round-robin atomically. In that case,
     # circle rotation gives one bye per team, in roster order, on each leg.
-    if len(matches) == team_count * (team_count - 1):
+    if matches_count == team_count * (team_count - 1):
         return [
             {"leg_no": leg, "round_no": round_no, "entry_id": entry_id}
             for leg in (1, 2)
@@ -67,10 +74,16 @@ def byes(entry_ids: list[str], matches: list[dict[str, Any]]) -> list[dict[str, 
         ]
 
     # Preserve participant-based behavior for partial schedules.
-    out = []
-    seen = {(m["leg_no"], m["round_no"]): set() for m in matches}
+    seen: dict[tuple[int, int], set[str]] = {}
     for m in matches:
-        seen[(m["leg_no"], m["round_no"])] |= {m["white_entry_id"], m["black_entry_id"]}
+        key = (m["leg_no"], m["round_no"])
+        present = seen.get(key)
+        if present is None:
+            seen[key] = {m["white_entry_id"], m["black_entry_id"]}
+        else:
+            present.add(m["white_entry_id"])
+            present.add(m["black_entry_id"])
+    out = []
     for (leg, rnd), present in sorted(seen.items()):
         for eid in entry_ids:
             if eid not in present:
