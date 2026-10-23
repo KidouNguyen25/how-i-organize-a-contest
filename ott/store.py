@@ -536,8 +536,13 @@ class Store:
                 (user_id,),
             )
             finished_filter = " AND m.status='FINISHED'" if finished_matches_only else ""
+            result_projection = (
+                "m.tournament_id,m.white_entry_id,m.black_entry_id,m.result"
+                if stream_matches else
+                "m.id,m.tournament_id,m.round_no,m.leg_no,m.pairing_no,m.white_entry_id,m.black_entry_id,m.status,m.result"
+            )
             results_cursor = con.execute(
-                "SELECT m.id,m.tournament_id,m.round_no,m.leg_no,m.pairing_no,m.white_entry_id,m.black_entry_id,m.status,m.result "
+                "SELECT " + result_projection + " "
                 + "FROM entries mine JOIN matches m ON m.tournament_id=mine.tournament_id "
                 "WHERE mine.user_id=? AND mine.status<>'REMOVED'" + finished_filter + " "
                 "ORDER BY mine.status,mine.tournament_id",
@@ -1011,11 +1016,11 @@ class Store:
         return int(row[0])
 
     def iter_finished_match_results(self, tid: str) -> Iterator[sqlite3.Row]:
-        """Stream final results in schedule order for standings calculations."""
+        """Stream standings result fields in schedule order."""
         with self.tx() as con:
             con.execute("BEGIN")
             yield from con.execute(
-                "SELECT id,tournament_id,round_no,leg_no,pairing_no,white_entry_id,black_entry_id,status,result "
+                "SELECT white_entry_id,black_entry_id,result "
                 "FROM matches WHERE tournament_id=? AND status='FINISHED' ORDER BY leg_no,round_no,pairing_no",
                 (tid,),
             )
