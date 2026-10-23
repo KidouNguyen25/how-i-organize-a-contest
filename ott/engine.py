@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+try:
+    import orjson
+except ImportError:
+    orjson = None
+
 FILES = "abcdefghi"
 _SQUARES = tuple(tuple(f"{FILES[file]}{rank + 1}" for file in range(9)) for rank in range(9))
 _SQUARE_COORDINATES = {square: (file, rank) for rank, row in enumerate(_SQUARES) for file, square in enumerate(row)}
@@ -412,6 +417,11 @@ def observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict
 def encode_observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int]) -> bytes:
     """Serialize protocol view without cloning state fields used only for immediate encoding."""
     view = _observation(state, side, match_id, clocks_ms, isolate_mutable_fields=False)
+    if orjson is not None:
+        try:
+            return orjson.dumps(view)
+        except TypeError:
+            pass
     return json.dumps(view, separators=(",", ":"), check_circular=False).encode("utf-8")
 
 
