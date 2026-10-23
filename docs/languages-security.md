@@ -91,12 +91,14 @@ Không xóa manifest hoặc tắt kiểm tra để tiếp tục trận đang d�
 
 ## Firewall và giới hạn an toàn
 
-File nftables dành cho VM Linux riêng, dùng console quản trị.
+File nftables dành cho VM Linux riêng, dùng console quản trị. `deploy/apply-firewall.sh check`
+kiểm cấu hình hiện tại mà không đổi rules; `apply --yes` thay riêng bảng `inet contest_demo`
+trong một giao dịch nftables. Unit `deploy/contest-firewall.service` có thể bật riêng để
+áp chính sách sau reboot; ứng dụng không tự cài hoặc kích hoạt unit.
 Trước khi áp dụng, điền IP vào các set `approved_dns_v4/v6`, `approved_ntp_v4/v6`
 và `approved_tunnel_v4/v6`; rà quyền quản trị của VM. Set rỗng chặn kết nối outbound mới.
 Duy trì danh sách khi endpoint nhà cung cấp thay đổi. Dùng
-`sudo nft -c -f deploy/firewall.nft` để kiểm tra cấu hình.
-Ứng dụng không tự áp dụng firewall. Không dùng `flush ruleset`.
+`sudo sh deploy/apply-firewall.sh check` để kiểm tra cấu hình. Không dùng `flush ruleset`.
 Rollback riêng bảng này bằng `sudo nft delete table inet contest_demo`.
 Forwarding và Docker published ports bị chặn trên VM này; chuẩn bị image trước khi áp firewall.
 

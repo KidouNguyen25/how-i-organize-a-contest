@@ -1,6 +1,6 @@
 # Chạy phần worker, sandbox và vận hành
 
-Các lệnh dưới đây dành cho người vận hành. Chưa áp firewall hoặc triển khai dịch vụ khi thêm các file này.
+Các lệnh dưới đây dành cho người vận hành. Thêm file cấu hình không tự áp firewall hoặc cài dịch vụ.
 
 ## Phạm vi hiện tại
 
@@ -75,7 +75,9 @@ Polling màn hình nộp bài dùng 10 giây và dừng tab ẩn. Polling tổng
 
 `firewall.nft` là profile cho Linux VM riêng: chặn inbound mới, chặn toàn bộ forwarding, chỉ cho outbound DNS/NTP/HTTPS/Tunnel tới IP theo set riêng đã duyệt. Sáu set IPv4/IPv6 ban đầu rỗng nên kết nối mới ra ngoài bị chặn cho tới khi người vận hành thêm IP DNS, NTP và Tunnel đã rà soát. Mỗi set chỉ mở cổng cần cho dịch vụ đó. Không mở SSH công khai, API, DB hoặc Docker TCP. Rule inet áp cả IPv4/IPv6 và chặn forwarding trước chain Docker. Không phụ thuộc UFW để bảo vệ published ports.
 
-Rà interface, DNS/NTP, DHCP và đích Cloudflare trên VM thật. Điền các set `approved_dns_v4/v6`, `approved_ntp_v4/v6` và `approved_tunnel_v4/v6` theo hạ tầng thực tế; cập nhật IP khi nhà cung cấp đổi endpoint. Có console và bản rollback trước khi áp. Dùng `nft -c -f deploy/firewall.nft` để kiểm cấu hình trước; rollback chỉ xóa bảng `inet contest_demo`. Không flush toàn bộ ruleset. Image build qua Docker bridge bị chặn, nên chuẩn bị image trước cửa sổ demo.
+Rà interface, DNS/NTP, DHCP và đích Cloudflare trên VM thật. Điền các set `approved_dns_v4/v6`, `approved_ntp_v4/v6` và `approved_tunnel_v4/v6` theo hạ tầng thực tế; cập nhật IP khi nhà cung cấp đổi endpoint. Có console và bản rollback trước khi áp. `sudo sh deploy/apply-firewall.sh check` kiểm cấu hình hiện tại mà không đổi rules. `sudo sh deploy/apply-firewall.sh apply --yes` thay riêng bảng `inet contest_demo` trong một giao dịch nftables. Không flush toàn bộ ruleset. Image build qua Docker bridge bị chặn, nên chuẩn bị image trước cửa sổ demo.
+
+Để tự áp lại sau reboot, rà nội dung rồi cài unit bằng `sudo install -m 0644 deploy/contest-firewall.service /etc/systemd/system/contest-firewall.service`. Chạy `sudo systemctl daemon-reload` và `sudo systemctl enable contest-firewall.service` để bật cho lần reboot sau. Unit chỉ được bật theo yêu cầu người vận hành; ứng dụng OTT không tự cài hoặc kích hoạt firewall. Chỉ bật trên VM riêng sau khi xác nhận console hoạt động, các IP set đã điền và rollback sẵn sàng. Bỏ unit bằng `sudo systemctl disable --now contest-firewall.service`; rollback bảng bằng `sudo nft delete table inet contest_demo`.
 
 `contest.service` dùng tài khoản vận hành tin cậy `contest`, checkout `/opt/contest`, data `/srv/contest/data`, workspace `/srv/contest/work`, môi trường `/etc/contest/demo.env` và allowlist `/etc/contest/source-allowlist.json`. Tạo các đường dẫn/quyền tương ứng trước khi cài service. `TMPDIR` phải nhìn thấy được từ Docker daemon, vì vậy không đặt bind source trong private `/tmp` của systemd. Quyền nhóm Docker vẫn tương đương đặc quyền host; chỉ dùng VM chuyên biệt và source mẫu đã duyệt.
 

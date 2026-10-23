@@ -1,0 +1,21 @@
+[Unit]
+Description=Contest demo host firewall
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/contest/deploy/apply-firewall.sh apply --yes
+RemainAfterExit=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+
+[Install]
+WantedBy=network-pre.target
