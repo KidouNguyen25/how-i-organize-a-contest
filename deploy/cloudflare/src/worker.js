@@ -9,7 +9,8 @@ const TEXT_RESPONSE = new RegExp(`^/(bot-template|bots/${SEG}/source)$`);
 // Allowlist method + path (phần sau /api/v1). Khớp bảng route của ott/api.py.
 const ROUTES = [
   ['POST', new RegExp('^/auth/(register|login|logout)$')],
-  ['GET', new RegExp('^/(me|stats|tournaments|live|bot-template|ops/status)
+  ['GET', new RegExp('^/(me|stats|tournaments|live|bot-template|ops/status)$')],
+  ['POST', new RegExp('^/ops/maintenance$')],
   ['POST', new RegExp('^/tournaments$')],
   ['GET', new RegExp(`^/tournaments/${SEG}$`)],
   ['PATCH', new RegExp(`^/tournaments/${SEG}$`)],
