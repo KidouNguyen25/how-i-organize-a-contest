@@ -264,13 +264,21 @@ class MatchRunner:
             exes = {}
             artifacts = {}
             languages = {}
+            frozen_by_side = {}
+            bot_ids = []
             for side in ("white", "black"):
-                self._check_control()
                 eid = match[f"{side}_entry_id"]
-                frozen = next((entry for entry in snapshot["entries"] if entry["id"] == eid),None)
+                frozen = next((entry for entry in snapshot["entries"] if entry["id"] == eid), None)
                 if not frozen or not frozen["bot_submission_id"]:
                     raise InfraError("immutable bot reference is missing")
-                bot = self.store.get_bot(frozen["bot_submission_id"])
+                frozen_by_side[side] = frozen
+                bot_ids.append(frozen["bot_submission_id"])
+            self._check_control()
+            stored_bots = self.store.get_bots(bot_ids)
+            for side in ("white", "black"):
+                self._check_control()
+                frozen = frozen_by_side[side]
+                bot = stored_bots.get(frozen["bot_submission_id"])
                 if (not bot or bot["source_sha256"] != frozen["source_sha256"]
                         or bot["language"] != frozen.get("language", "cpp17")):
                     raise InfraError("submitted source hash or language differs from execution snapshot")
