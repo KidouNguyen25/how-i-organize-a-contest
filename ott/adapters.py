@@ -26,6 +26,7 @@ class OTTAdapter:
     version = "1"
     initial_state = staticmethod(engine.new_state)
     observation = staticmethod(engine.observation)
+    encode_observation = staticmethod(engine.encode_observation)
     parse_action = staticmethod(engine.parse_action)
     validate_action = staticmethod(engine.validate_action)
     apply_action = staticmethod(engine.apply_action)

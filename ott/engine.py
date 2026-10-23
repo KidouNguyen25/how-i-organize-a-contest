@@ -349,29 +349,45 @@ def validate_action(state: dict[str, Any], action: Action) -> bool:
     return _piece_can_move_to(board, origin, piece, dest, destination)
 
 
-def observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int]) -> dict[str, Any]:
+def _observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int], *,
+                isolate_mutable_fields: bool) -> dict[str, Any]:
     if state["phase"] == "placement":
         board = {k: v for k, v in state["board"].items() if v["side"] == side}
         history = [h for h in state["history"] if h["side"] == side]
-        remaining = dict(state["remaining"][side])
+        remaining = state["remaining"][side]
         phase = "placement"
     else:
         board = state["board"]
         history = state["history"]
         remaining = {p: 0 for p in PIECES}
         phase = "play"
-    # Protocol v1 piece and action fields are scalars; copy both mutable dictionary levels.
+    if isolate_mutable_fields:
+        board = {square: dict(piece) for square, piece in board.items()}
+        history = [entry | {"action": dict(entry["action"])} for entry in history]
+        if phase == "placement":
+            remaining = dict(remaining)
     return {
         "protocol_version": 1,
         "match_id": match_id,
         "phase": phase,
         "side": side,
-        "board": {square: dict(piece) for square, piece in board.items()},
+        "board": board,
         "remaining_pieces": remaining,
         "clocks_ms": {"white": int(clocks_ms["white"]), "black": int(clocks_ms["black"])},
         "legal_actions": legal_actions(state, side),
-        "history": [entry | {"action": dict(entry["action"])} for entry in history],
+        "history": history,
     }
+
+
+def observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int]) -> dict[str, Any]:
+    """Return an isolated protocol view for callers that may mutate it."""
+    return _observation(state, side, match_id, clocks_ms, isolate_mutable_fields=True)
+
+
+def encode_observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int]) -> bytes:
+    """Serialize protocol view without cloning state fields used only for immediate encoding."""
+    view = _observation(state, side, match_id, clocks_ms, isolate_mutable_fields=False)
+    return json.dumps(view, separators=(",", ":")).encode("utf-8")
 
 
 def parse_action(line: str) -> Action:

@@ -351,8 +351,12 @@ class MatchRunner:
                 return self._lose(side,"EXTRA_OUTPUT")
             if clocks[side] <= 0:
                 return self._lose(side,"TIMEOUT")
-            observation = self.adapter.observation(state,side,self.mid,clocks)
-            payload = json.dumps(observation,separators=(",",":")).encode("utf-8")
+            encode_observation = getattr(self.adapter, "encode_observation", None)
+            if encode_observation is None:
+                observation = self.adapter.observation(state,side,self.mid,clocks)
+                payload = json.dumps(observation,separators=(",",":")).encode("utf-8")
+            else:
+                payload = encode_observation(state,side,self.mid,clocks)
             if len(payload) > MAX_LINE:
                 raise InfraError("adapter observation exceeds protocol size")
             started = time.monotonic()
