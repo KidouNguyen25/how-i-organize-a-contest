@@ -800,19 +800,6 @@ class Store:
             row = con.execute(f"SELECT {cols} FROM bot_submissions WHERE id = ?", (bid,)).fetchone()
         return dict(row) if row else None
 
-    def get_bots(self, bids: Iterable[str]) -> dict[str, dict[str, Any]]:
-        ids = tuple(dict.fromkeys(bids))
-        if not ids:
-            return {}
-        marks = ",".join("?" for _ in ids)
-        with self.tx() as con:
-            rows = con.execute(
-                "SELECT id,tournament_id,user_id,language,source_sha256,source_size,compile_status,compile_message,created_at "
-                f"FROM bot_submissions WHERE id IN ({marks})",
-                ids,
-            ).fetchall()
-        return {row["id"]: dict(row) for row in rows}
-
     # ---------------- matches ----------------
     def create_matches(self, tid: str, rows: Iterable[dict[str, Any]], clock_ms: int) -> None:
         self.create_matches_from_schedule(

@@ -67,26 +67,37 @@ def ensure_binary_info(store: Store, data_dir: Path, bot_id: str,
         bot = store.get_bot(bot_id)
     if not bot:
         raise InfraError("submitted bot is missing")
+    source_hash = bot.get("source_sha256")
+    language = bot.get("language", "cpp17")
+    if (not isinstance(source_hash, str) or len(source_hash) != 64
+            or any(char not in "0123456789abcdef" for char in source_hash)):
+        raise InfraError("immutable source hash is invalid")
+    if not isinstance(language, str):
+        raise InfraError("immutable source language is invalid")
     if exe.exists():
-        manifest = SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"], expected_language=bot["language"])
+        manifest = SANDBOX.verify_artifact(exe, expected_source_hash=source_hash, expected_language=language)
         return exe, manifest["binary_sha256"]
     if SANDBOX.kind == "docker":
         raise InfraError("submitted artifact is missing; restore a verified backup or submit a new approved version")
     with _REBUILD_LOCK:
         if exe.exists():
-            manifest = SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"], expected_language=bot["language"])
+            manifest = SANDBOX.verify_artifact(exe, expected_source_hash=source_hash, expected_language=language)
             return exe, manifest["binary_sha256"]
         if "source" not in bot:
-            bot = store.get_bot(bot_id, with_source=True)
+            stored_bot = store.get_bot(bot_id, with_source=True)
+            if (not stored_bot or stored_bot["source_sha256"] != source_hash
+                    or stored_bot["language"] != language):
+                raise InfraError("stored bot differs from the immutable execution snapshot")
+            bot = stored_bot
         if not bot or not bot["source"]:
             raise InfraError("binary missing and no source to rebuild it")
         owner = "rebuild-" + uuid.uuid4().hex
         try:
             with store.compile_slot(owner) as token:
-                ok, msg = compile_source(exe, bot["source"], bot["language"])
+                ok, msg = compile_source(exe, bot["source"], language)
                 store.assert_compile_slot(owner,token)
                 if ok:
-                    manifest = SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"], expected_language=bot["language"])
+                    manifest = SANDBOX.verify_artifact(exe, expected_source_hash=source_hash, expected_language=language)
         except LeaseLost as exc:
             raise InfraError("compiler slot unavailable or expired before artifact acceptance") from exc
         if not ok:
@@ -265,27 +276,20 @@ class MatchRunner:
             artifacts = {}
             languages = {}
             frozen_by_side = {}
-            bot_ids = []
             for side in ("white", "black"):
                 eid = match[f"{side}_entry_id"]
                 frozen = next((entry for entry in snapshot["entries"] if entry["id"] == eid), None)
                 if not frozen or not frozen["bot_submission_id"]:
                     raise InfraError("immutable bot reference is missing")
                 frozen_by_side[side] = frozen
-                bot_ids.append(frozen["bot_submission_id"])
-            self._check_control()
-            stored_bots = self.store.get_bots(bot_ids)
             for side in ("white", "black"):
                 self._check_control()
                 frozen = frozen_by_side[side]
-                bot = stored_bots.get(frozen["bot_submission_id"])
-                if (not bot or bot["source_sha256"] != frozen["source_sha256"]
-                        or bot["language"] != frozen.get("language", "cpp17")):
-                    raise InfraError("submitted source hash or language differs from execution snapshot")
+                language = frozen.get("language", "cpp17")
                 exes[side], artifacts[side] = ensure_binary_info(
-                    self.store, self.data_dir, frozen["bot_submission_id"], bot,
+                    self.store, self.data_dir, frozen["bot_submission_id"], frozen,
                 )
-                languages[side] = bot["language"]
+                languages[side] = language
             self._check_control()
             self.store.start_execution(self.mid,self.lease,{
                 "kind":SANDBOX.kind,"image":getattr(SANDBOX,"image",None),
