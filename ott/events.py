@@ -77,10 +77,12 @@ class Hub:
             self._subs.discard(sub)
 
     def publish(self, type_: str, id_: str | None = None, **data: Any) -> None:
-        event = {"type": type_, "id": id_, **data}
         with self._lock:
-            subs = list(self._subs)
             self.published += 1
+            if not self._subs:
+                return
+            subs = tuple(self._subs)
+        event = {"type": type_, "id": id_, **data}
         for sub in subs:
             sub.put(event)
 
