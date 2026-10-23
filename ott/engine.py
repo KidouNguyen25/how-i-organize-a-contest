@@ -390,7 +390,7 @@ def observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict
 def encode_observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int]) -> bytes:
     """Serialize protocol view without cloning state fields used only for immediate encoding."""
     view = _observation(state, side, match_id, clocks_ms, isolate_mutable_fields=False)
-    return json.dumps(view, separators=(",", ":")).encode("utf-8")
+    return json.dumps(view, separators=(",", ":"), check_circular=False).encode("utf-8")
 
 
 def parse_action(line: str) -> Action:
