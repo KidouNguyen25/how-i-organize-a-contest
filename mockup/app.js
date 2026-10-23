@@ -288,7 +288,13 @@ async function pageTournament(id, q) {
   if (t.status === 'RUNNING' && mine) actions = `<span class="spacer"></span><a class="button green" href="#/game/${mine.id}">▶ Ván của tôi</a>`;
   const countdown = t.status === 'CODING' ? `<div class="tour__clock" id="tour-clock">${fmtCountdown(t.coding_deadline - nowSrv())}<small>còn lại để nộp bot</small></div>` : '';
   if (t.status === 'CODING') every(500, () => { const el = $('#tour-clock'); if (el) el.firstChild.textContent = fmtCountdown(t.coding_deadline - nowSrv()); });
-  if (t.status === 'RUNNING') every(3000, () => { if (renderId === routing && location.hash.startsWith(`#/tournament/${id}`)) route(true); });
+  if (t.status === 'RUNNING') every(10000, async () => {
+    if (renderId !== routing || !location.hash.startsWith(`#/tournament/${id}`) || LIVE.ok) return;
+    try {
+      const latest = await api('GET', `/tournaments/${id}`);
+      if (renderId === routing && (latest.status !== t.status || latest.matches_finished !== t.matches_finished || latest.matches_running !== t.matches_running)) route(true);
+    } catch { /* SSE reconnect or next fallback poll will refresh */ }
+  });
   const rounds = {};
   sched.matches.forEach((m) => { (rounds[`Lượt ${m.leg_no} · Vòng ${m.round_no}`] ||= []).push(m); });
   const pair = Object.entries(rounds).map(([r, ms]) => `<div class="pair-round">${r}</div>${ms.map((m) => `<div class="pair-row"><span class="dim">#${m.pairing_no}</span><span><span class="dot w" style="display:inline-block;width:.8rem;height:.8rem;border-radius:50%;background:#eee;margin-right:.4rem"></span><a class="user-name" href="#/user/${esc(m.white.username)}">${esc(m.white.username)}</a></span>
@@ -751,7 +757,9 @@ async function pageOrgManage(id, q) {
   const canCancel = ['DRAFT', 'REGISTRATION_OPEN', 'CODING', 'LOCKED'].includes(t.status);
   const submitted = ent.items.filter((e) => e.submitted_at).length;
   if (t.status === 'CODING') every(500, () => { const el = $('#org-timer'); if (el) el.textContent = fmtCountdown(t.coding_deadline - nowSrv()); });
-  if (['CODING', 'RUNNING', 'REGISTRATION_OPEN', 'LOCKED'].includes(t.status)) every(3000, () => { if (renderId === routing && location.hash.startsWith(`#/organizer/manage/${id}`)) route(true); });
+  if (['CODING', 'RUNNING', 'REGISTRATION_OPEN', 'LOCKED'].includes(t.status)) every(10000, () => {
+    if (renderId === routing && location.hash.startsWith(`#/organizer/manage/${id}`) && !LIVE.ok) route(true);
+  });
   const entryState = (e) => e.submitted_at ? '<span class="tag ok">🔒 Đã nộp</span>' : e.submission_status === 'QUEUED' ? '<span class="tag warn">Đã nhận, chờ biên dịch</span>' : e.submission_status === 'REVIEW' ? '<span class="tag err">Cần kiểm tra hạ tầng</span>' : e.submit_note ? `<span class="tag err" title="${esc(e.submit_note)}">Không nộp được</span>` : t.status === 'CODING' ? '<span class="tag warn">Đang viết</span>' : '<span class="tag">Chưa nộp</span>';
   return `<div class="page"><div class="stack"><section class="box"><div class="box__top"><h1>Quản lý: ${esc(t.name)}</h1><span class="tag warn">ORGANIZER</span>${tag(t.status)}</div>
     <div class="stepper">${ORG_STEPS.map(([s, n], i) => `<div class="step ${t.status === 'CANCELLED' ? '' : i < idx ? 'done' : i === idx ? 'cur' : ''}"><i>${i < idx ? '✓' : i + 1}</i>${n}</div>`).join('')}</div>
@@ -792,7 +800,11 @@ function onLiveEvent(ev) {
     if (ev.type === 'match' && ev.move_count !== undefined) return; // standings change only when match status changes
     softRefresh(300); return;
   }
-  if (k === 'organizer' && PAGE.id === 'manage') { if (tid === PAGE.sub) softRefresh(slow ? 1500 : 300); return; }
+  if (k === 'organizer' && PAGE.id === 'manage') {
+    if (tid !== PAGE.sub) return;
+    if (ev.type === 'match' && ev.move_count !== undefined) return;
+    softRefresh(300); return;
+  }
   softRefresh(slow ? 1500 : 300); // home, danh sách giải, xem nhiều ván, bot, hồ sơ
 }
 function connectStream() {
