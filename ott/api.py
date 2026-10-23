@@ -691,9 +691,51 @@ class App:
         @r("GET", "/tournaments/{tid}/schedule")
         def get_schedule(ctx: Ctx, tid: str) -> Any:
             app.require_tournament(tid)
-            matches = app.store.list_match_summaries(tid)
+            query = parse_qs(urlsplit(ctx.handler.path).query, keep_blank_values=True)
+
+            def query_int(name: str, default: int, minimum: int, maximum: int) -> int:
+                values = query.get(name)
+                if values is None:
+                    return default
+                if (len(values) != 1 or not values[0].isascii() or not values[0].isdigit()
+                        or len(values[0]) > len(str(maximum))):
+                    raise ApiError(400, "BAD_QUERY", f"Invalid {name} query parameter.")
+                value = int(values[0])
+                if not minimum <= value <= maximum:
+                    raise ApiError(400, "BAD_QUERY", f"Invalid {name} query parameter.")
+                return value
+
+            if "recent" in query:
+                recent = query_int("recent", 12, 1, 50)
+                matches = app.store.list_recent_finished_match_summaries(tid, recent)
+                return 200, {"matches": [app.summary(m) for m in matches], "byes": []}
+
             entries = app.store.list_entries(tid)
-            return 200, {"matches": [app.summary(m) for m in matches], "byes": byes([e["id"] for e in entries], matches)}
+            entry_ids = [e["id"] for e in entries]
+            paged = "limit" in query or "offset" in query
+            if not paged:
+                matches = app.store.list_match_summaries(tid)
+                return 200, {"matches": [app.summary(m) for m in matches], "byes": byes(entry_ids, matches)}
+
+            limit = query_int("limit", 100, 1, 200)
+            offset = query_int("offset", 0, 0, 1_000_000_000)
+            total = app.store.count_match_summaries(tid)
+            matches = app.store.list_match_summaries(tid, limit, offset)
+            if len(entry_ids) % 2 and total == len(entry_ids) * (len(entry_ids) - 1):
+                bye_rows = [
+                    {"leg_no": leg, "round_no": round_no, "entry_id": entry_id}
+                    for leg in (1, 2)
+                    for round_no, entry_id in enumerate(entry_ids, start=1)
+                ] if total else []
+            elif len(entry_ids) % 2:
+                bye_rows = byes(entry_ids, app.store.list_match_summaries(tid))
+            else:
+                bye_rows = []
+            return 200, {
+                "matches": [app.summary(m) for m in matches], "byes": bye_rows,
+                "total": total, "limit": limit, "offset": offset,
+                "has_more": offset + len(matches) < total,
+            }
 
         @r("GET", "/tournaments/{tid}/standings")
         def get_standings(ctx: Ctx, tid: str) -> Any:

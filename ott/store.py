@@ -849,14 +849,31 @@ class Store:
             rows = con.execute(sql, (*args, limit)).fetchall()
         return [dict(r) for r in rows]
 
-    def list_match_summaries(self, tid: str) -> list[dict[str, Any]]:
-        """Read the complete tournament schedule without execution snapshots."""
+    def list_match_summaries(self, tid: str, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        """Read tournament schedule summaries without execution snapshots."""
+        sql = self._MATCH_SUMMARY_SQL + "WHERE m.tournament_id = ? ORDER BY m.leg_no, m.round_no, m.pairing_no"
+        args: tuple[Any, ...] = (tid,)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            args += (limit, offset)
         with self.tx() as con:
-            rows = con.execute(
-                self._MATCH_SUMMARY_SQL + "WHERE m.tournament_id = ? ORDER BY m.leg_no, m.round_no, m.pairing_no",
-                (tid,),
-            ).fetchall()
+            rows = con.execute(sql, args).fetchall()
         return [dict(row) for row in rows]
+
+    def count_match_summaries(self, tid: str) -> int:
+        with self.tx() as con:
+            row = con.execute("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", (tid,)).fetchone()
+        return int(row[0])
+
+    def list_recent_finished_match_summaries(self, tid: str, limit: int) -> list[dict[str, Any]]:
+        """Read latest finished rows through the partial schedule index."""
+        sql = self._MATCH_SUMMARY_SQL + (
+            "WHERE m.tournament_id = ? AND m.status = 'FINISHED' "
+            "ORDER BY m.leg_no DESC, m.round_no DESC, m.pairing_no DESC LIMIT ?"
+        )
+        with self.tx() as con:
+            rows = con.execute(sql, (tid, limit)).fetchall()
+        return [dict(row) for row in reversed(rows)]
 
     def list_match_results(self, tid: str) -> list[dict[str, Any]]:
         """Read only the complete results and schedule fields needed for standings."""

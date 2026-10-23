@@ -266,17 +266,21 @@ async function pageTournaments() {
 
 async function pageTournament(id, q) {
   const renderId = routing;
-  const [t, st, sched] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/standings`), api('GET', `/tournaments/${id}/schedule`)]);
+  const tab = q.get('tab') || 'standings';
+  const offset = Math.max(0, Number.parseInt(q.get('offset') || '0', 10) || 0);
+  const [t, st] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/standings`)]);
   if (renderId !== routing) return '';
   syncOffset(t.server_time);
-  const tab = q.get('tab') || 'standings';
+  const sched = tab === 'pairings'
+    ? await api('GET', `/tournaments/${id}/schedule?limit=100&offset=${offset}`)
+    : { matches: [], total: 0, has_more: false, limit: 100, offset };
+  if (renderId !== routing) return '';
   let entry = null;
   if (isContestant()) { try { entry = await api('GET', `/tournaments/${id}/entry`); } catch { /* chưa đăng ký */ } }
   if (renderId !== routing) return '';
-  const hasLive = sched.matches.some((m) => m.status === 'RUNNING');
-  const liveDetail = hasLive ? (await api('GET', '/live')).items.filter((m) => m.tournament_id === id) : [];
+  const liveDetail = t.matches_running ? (await api('GET', '/live')).items.filter((m) => m.tournament_id === id) : [];
   if (renderId !== routing) return '';
-  const mine = S.me ? sched.matches.find((m) => m.status === 'RUNNING' && (m.white.username === S.me.username || m.black.username === S.me.username)) : null;
+  const mine = S.me ? liveDetail.find((m) => m.white.username === S.me.username || m.black.username === S.me.username) : null;
   let actions = '';
   if (t.status === 'REGISTRATION_OPEN' && isContestant()) actions = entry ? '<span class="tag ok">Đã đăng ký</span><span class="dim">Chờ organizer bắt đầu giai đoạn viết bot</span>' : `<button class="button green" data-act="register" data-tid="${id}">Đăng ký tham gia</button>`;
   if (t.status === 'REGISTRATION_OPEN' && !S.me) actions = '<a class="button green" href="#/login">Đăng nhập để đăng ký</a>';
@@ -290,6 +294,7 @@ async function pageTournament(id, q) {
   const pair = Object.entries(rounds).map(([r, ms]) => `<div class="pair-round">${r}</div>${ms.map((m) => `<div class="pair-row"><span class="dim">#${m.pairing_no}</span><span><span class="dot w" style="display:inline-block;width:.8rem;height:.8rem;border-radius:50%;background:#eee;margin-right:.4rem"></span><a class="user-name" href="#/user/${esc(m.white.username)}">${esc(m.white.username)}</a></span>
       <span class="sc">${m.status === 'FINISHED' ? SCORE[m.result] : m.status === 'RUNNING' ? '<span class="tag live">LIVE</span>' : m.status === 'PAUSED' ? '<span class="tag err">Tạm dừng</span>' : '<span class="tag">Chờ</span>'}</span>
       <span class="r"><a class="user-name" href="#/user/${esc(m.black.username)}">${esc(m.black.username)}</a> <span class="dot b" style="display:inline-block;width:.8rem;height:.8rem;border-radius:50%;background:#222;border:1px solid #777;margin-left:.4rem"></span></span><span class="r"><a href="#/game/${m.id}">${m.status === 'SCHEDULED' ? '' : 'Xem'}</a></span></div>`).join('')}`).join('');
+  const pairPage = sched.total ? `<div class="row" style="padding:1rem;justify-content:center;gap:.75rem"><a class="button small ${offset === 0 ? 'disabled' : ''}" href="#/tournament/${id}?tab=pairings&offset=${Math.max(0, offset - sched.limit)}">Trước</a><span class="dim">${offset + 1}–${Math.min(offset + sched.matches.length, sched.total)} / ${sched.total}</span><a class="button small ${sched.has_more ? '' : 'disabled'}" href="#/tournament/${id}?tab=pairings&offset=${offset + sched.limit}">Tiếp</a></div>` : '';
   const podium = t.status === 'FINISHED' && st.items.length >= 3 ? `<section class="box"><div class="box__title">Top 3</div><div class="podium"><div><span class="medal">🥈</span><span>${esc(st.items[1].username)}</span><small>${st.items[1].points}</small></div><div class="p1"><span class="medal">🥇</span><span>${esc(st.items[0].username)}</span><small>${st.items[0].points}</small></div><div><span class="medal">🥉</span><span>${esc(st.items[2].username)}</span><small>${st.items[2].points}</small></div></div></section>` : '';
   const fetchedAt = Date.now();
   tickMiniClocks(liveDetail, fetchedAt);
@@ -301,7 +306,7 @@ async function pageTournament(id, q) {
       ${actions ? `<div class="row" style="padding:0 1.3rem 1rem">${actions}</div>` : ''}
       <div class="tabs"><a class="${tab === 'standings' ? 'on' : ''}" href="#/tournament/${id}">Bảng điểm</a><a class="${tab === 'pairings' ? 'on' : ''}" href="#/tournament/${id}?tab=pairings">Lịch đấu</a></div>
       ${tab === 'standings' ? `<table class="slist"><thead><tr><th>#</th><th>Thí sinh</th><th>Kết quả các ván</th><th class="r">Điểm</th></tr></thead><tbody>${st.items.map((r) => `<tr class="${S.me && r.username === S.me.username ? 'me' : ''}"><td class="rankn">${r.rank}</td><td><span class="title-tag">BOT</span><a href="#/user/${esc(r.username)}" class="user-name">${esc(r.username)}</a></td><td>${sheetHTML(r.sheet)}</td><td class="r"><b class="user-name">${r.points}</b></td></tr>`).join('') || '<tr><td colspan="4" class="dim">Chưa có thí sinh đăng ký.</td></tr>'}</tbody></table>`
-        : (pair || '<div class="box-pad dim">Chưa sinh lịch đấu. Organizer sinh lịch sau khi khóa roster.</div>')}</section></div>
+        : (pair ? pair + pairPage : '<div class="box-pad dim">Chưa sinh lịch đấu. Organizer sinh lịch sau khi khóa roster.</div>')}</section></div>
     <aside class="stack">${liveDetail.length ? `<section class="box tv-box"><div class="box__title" style="padding:.3rem .3rem .6rem;border:0">Ván đang diễn ra <a href="#/watch">Tất cả »</a></div>${miniGameHTML(liveDetail[0])}</section>` : ''}${podium}
       <section class="box"><div class="box__title">Thống kê giải</div><div class="stat-list"><div><span>Ván đang chạy</span><b>${t.matches_running}</b></div><div><span>Bắt đầu</span><b>${fmtDate(t.started_at)}</b></div><div><span>Kết thúc</span><b>${fmtDate(t.finished_at)}</b></div></div></section></aside>
   </div></div>`;
@@ -439,7 +444,7 @@ async function pageWatch() {
   const [live, ts] = await Promise.all([api('GET', '/live'), api('GET', '/tournaments')]);
   if (renderId !== routing) return '';
   const feat = featuredTournament(ts.items);
-  const recent = feat ? (await api('GET', `/tournaments/${feat.id}/schedule`)).matches.filter((m) => m.status === 'FINISHED').slice(-12).reverse() : [];
+  const recent = feat ? (await api('GET', `/tournaments/${feat.id}/schedule?recent=12`)).matches.reverse() : [];
   if (renderId !== routing) return '';
   tickMiniClocks(live.items, Date.now());
   const sig = (items) => items.map((x) => x.id + x.move_count).join();
@@ -727,10 +732,11 @@ function pageOrgNew() {
     <section class="box"><div class="box__title">Quy trình</div><div class="stat-list"><div><span>1</span><b>Nháp → Mở đăng ký</b></div><div><span>2</span><b>Bắt đầu viết bot (đếm ngược)</b></div><div><span>3</span><b>Khóa roster</b></div><div><span>4</span><b>Sinh lịch · Bắt đầu giải</b></div></div></section></div></div>`;
 }
 const ORG_STEPS = [['DRAFT', 'Nháp'], ['REGISTRATION_OPEN', 'Đăng ký'], ['CODING', 'Viết bot'], ['LOCKED', 'Đã khóa'], ['RUNNING', 'Thi đấu'], ['FINISHED', 'Kết thúc']];
-async function pageOrgManage(id) {
+async function pageOrgManage(id, q) {
   const g = orgGuard(); if (g) return g;
   const renderId = routing;
-  const [t, ent, sched] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/entries`), api('GET', `/tournaments/${id}/schedule`)]);
+  const offset = Math.max(0, Number.parseInt(q.get('offset') || '0', 10) || 0);
+  const [t, ent, sched] = await Promise.all([api('GET', `/tournaments/${id}`), api('GET', `/tournaments/${id}/entries`), api('GET', `/tournaments/${id}/schedule?limit=100&offset=${offset}`)]);
   if (renderId !== routing) return '';
   syncOffset(t.server_time);
   const idx = ORG_STEPS.findIndex(([s]) => s === t.status);
@@ -745,7 +751,7 @@ async function pageOrgManage(id) {
   const canCancel = ['DRAFT', 'REGISTRATION_OPEN', 'CODING', 'LOCKED'].includes(t.status);
   const submitted = ent.items.filter((e) => e.submitted_at).length;
   if (t.status === 'CODING') every(500, () => { const el = $('#org-timer'); if (el) el.textContent = fmtCountdown(t.coding_deadline - nowSrv()); });
-  if (['CODING', 'RUNNING', 'REGISTRATION_OPEN', 'LOCKED'].includes(t.status)) every(3000, () => { if (renderId === routing && location.hash === `#/organizer/manage/${id}`) route(true); });
+  if (['CODING', 'RUNNING', 'REGISTRATION_OPEN', 'LOCKED'].includes(t.status)) every(3000, () => { if (renderId === routing && location.hash.startsWith(`#/organizer/manage/${id}`)) route(true); });
   const entryState = (e) => e.submitted_at ? '<span class="tag ok">🔒 Đã nộp</span>' : e.submission_status === 'QUEUED' ? '<span class="tag warn">Đã nhận, chờ biên dịch</span>' : e.submission_status === 'REVIEW' ? '<span class="tag err">Cần kiểm tra hạ tầng</span>' : e.submit_note ? `<span class="tag err" title="${esc(e.submit_note)}">Không nộp được</span>` : t.status === 'CODING' ? '<span class="tag warn">Đang viết</span>' : '<span class="tag">Chưa nộp</span>';
   return `<div class="page"><div class="stack"><section class="box"><div class="box__top"><h1>Quản lý: ${esc(t.name)}</h1><span class="tag warn">ORGANIZER</span>${tag(t.status)}</div>
     <div class="stepper">${ORG_STEPS.map(([s, n], i) => `<div class="step ${t.status === 'CANCELLED' ? '' : i < idx ? 'done' : i === idx ? 'cur' : ''}"><i>${i < idx ? '✓' : i + 1}</i>${n}</div>`).join('')}</div>
@@ -755,7 +761,8 @@ async function pageOrgManage(id) {
       <section class="box"><div class="box__title">Danh sách suất <span class="dim">Organizer không xem source bot</span></div><table class="slist"><thead><tr><th>#</th><th>Thí sinh</th><th>Bài nộp</th><th>Biên dịch</th><th></th></tr></thead><tbody>
         ${ent.items.map((e, i) => `<tr><td class="rankn">${i + 1}</td><td class="user-name">${esc(e.username)}</td><td>${entryState(e)}</td><td>${e.compile_status ? `<span class="tag ${e.compile_status === 'READY' ? 'ok' : 'err'}">${e.compile_status === 'READY' ? 'Thành công' : 'Lỗi'}</span>` : '—'}</td><td class="r">${['REGISTRATION_OPEN', 'CODING'].includes(t.status) ? `<button class="button small red" data-act="remove-entry" data-eid="${e.id}">Loại</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="dim">Chưa có thí sinh đăng ký.</td></tr>'}</tbody></table></section>
       <section class="box"><div class="box__title">Lịch & hàng đợi trận <span class="dim">${t.matches_finished}/${t.matches_total}</span></div><table class="slist"><tbody>
-        ${sched.matches.map((m) => `<tr><td class="dim">L${m.leg_no}·V${m.round_no}</td><td>${esc(m.white.username)} – ${esc(m.black.username)}</td><td>${m.status === 'FINISHED' ? SCORE[m.result] : m.status === 'RUNNING' ? '<span class="tag live">LIVE</span>' : m.status === 'PAUSED' ? '<span class="tag err">Tạm dừng</span>' : '<span class="tag info">Chờ</span>'}</td><td class="r">${m.status === 'SCHEDULED' ? '' : `<a href="#/game/${m.id}">Xem</a>`}</td></tr>`).join('') || '<tr><td class="dim">Chưa sinh lịch.</td></tr>'}</tbody></table></section></div></div></div>`;
+        ${sched.matches.map((m) => `<tr><td class="dim">L${m.leg_no}·V${m.round_no}</td><td>${esc(m.white.username)} – ${esc(m.black.username)}</td><td>${m.status === 'FINISHED' ? SCORE[m.result] : m.status === 'RUNNING' ? '<span class="tag live">LIVE</span>' : m.status === 'PAUSED' ? '<span class="tag err">Tạm dừng</span>' : '<span class="tag info">Chờ</span>'}</td><td class="r">${m.status === 'SCHEDULED' ? '' : `<a href="#/game/${m.id}">Xem</a>`}</td></tr>`).join('') || '<tr><td class="dim">Chưa sinh lịch.</td></tr>'}</tbody></table>
+        ${sched.total ? `<div class="row" style="padding:.8rem;justify-content:center;gap:.75rem"><a class="button small" href="#/organizer/manage/${id}?offset=${Math.max(0, offset - sched.limit)}">Trước</a><span class="dim">${offset + 1}–${Math.min(offset + sched.matches.length, sched.total)} / ${sched.total}</span><a class="button small" href="#/organizer/manage/${id}?offset=${offset + sched.limit}">Tiếp</a></div>` : ''}</section></div></div></div>`;
 }
 
 /* ================= Cập nhật trực tiếp (SSE) ================= */
@@ -824,7 +831,7 @@ async function route(soft = false) {
       case 'user': html = await pageUser(seg[1]); break;
       case 'login': case 'register': html = pageAuth(key); break;
       case 'rules': html = pageRules(); break;
-      case 'organizer': html = seg[1] === 'new' ? pageOrgNew() : seg[1] === 'manage' ? await pageOrgManage(seg[2]) : await pageOrgList(); break;
+      case 'organizer': html = seg[1] === 'new' ? pageOrgNew() : seg[1] === 'manage' ? await pageOrgManage(seg[2], q) : await pageOrgList(); break;
       default: html = await pageHome();
     }
   } catch (e) { html = e instanceof ApiError && e.status === 401 ? needLogin() : errorHTML(errMsg(e)); }
