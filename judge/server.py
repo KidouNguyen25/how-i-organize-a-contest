@@ -110,8 +110,8 @@ class JudgeService:
                     await self._send(writer, failure(None, "INVALID_FRAMING", "Each request must end with a newline."))
                     break
                 try:
-                    raw_request = json.loads(line.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raw_request = orjson.loads(line) if orjson is not None else json.loads(line.decode("utf-8"))
+                except ValueError:
                     await self._send(writer, failure(None, "INVALID_JSON", "Request must be valid UTF-8 JSON."))
                     continue
                 request_id = raw_request.get("request_id") if isinstance(raw_request, dict) else None
