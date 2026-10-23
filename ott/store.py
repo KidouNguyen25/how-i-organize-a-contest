@@ -263,6 +263,7 @@ class Store:
             con.execute("CREATE INDEX IF NOT EXISTS tournaments_coding_deadline_idx ON tournaments(status,coding_deadline)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_claim_order_idx ON matches(leg_no,round_no,pairing_no,tournament_id,id) WHERE status='SCHEDULED'")
             con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_status_idx ON matches(tournament_id,status)")
+            con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_schedule_idx ON matches(tournament_id,leg_no,round_no,pairing_no)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_white_entry_updated_idx ON matches(white_entry_id,updated_at DESC)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_black_entry_updated_idx ON matches(black_entry_id,updated_at DESC)")
             con.execute("CREATE INDEX IF NOT EXISTS matches_finished_schedule_idx ON matches(tournament_id,leg_no,round_no,pairing_no) WHERE status='FINISHED'")
