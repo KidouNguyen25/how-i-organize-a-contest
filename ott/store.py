@@ -1186,13 +1186,22 @@ class Store:
                         (json.dumps(snapshot,sort_keys=True,separators=(",",":")),mid))
 
     def checkpoint(self, mid: str, white_ms: int, black_ms: int, *, lease: Lease) -> None:
+        white_ms, black_ms = max(0, int(white_ms)), max(0, int(black_ms))
         with self.tx() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = self._owned(con,mid,lease)
-            if white_ms > row["white_clock_ms"] or black_ms > row["black_clock_ms"]:
-                raise StoreError(409,"CLOCK_CONFLICT","Checkpoint cannot increase a clock.")
-            con.execute("UPDATE matches SET white_clock_ms=?,black_clock_ms=?,clock_checkpoint_at=?,updated_at=? WHERE id=?",
-                        (max(0,int(white_ms)),max(0,int(black_ms)),self._db_now(con),self._db_now(con),mid))
+            updated = con.execute(
+                "UPDATE matches SET white_clock_ms=?,black_clock_ms=?,"
+                "clock_checkpoint_at=CAST(strftime('%s','now') AS INTEGER),"
+                "updated_at=CAST(strftime('%s','now') AS INTEGER) "
+                "WHERE id=? AND status='RUNNING' AND lease_owner=? AND lease_epoch=? "
+                "AND lease_expires_at>CAST(strftime('%s','now') AS INTEGER) "
+                "AND white_clock_ms>=? AND black_clock_ms>=?",
+                (white_ms, black_ms, mid, lease.owner, lease.epoch, white_ms, black_ms),
+            ).rowcount
+            if updated != 1:
+                row = self._owned(con, mid, lease)
+                if white_ms > row["white_clock_ms"] or black_ms > row["black_clock_ms"]:
+                    raise StoreError(409, "CLOCK_CONFLICT", "Checkpoint cannot increase a clock.")
+                raise LeaseLost("Execution lease expired or was replaced.")
 
     def record_action(self, mid: str, seq: int, state: dict[str, Any], action: dict[str, Any], side: str, phase: str, clocks: dict[str, int], *, lease: Lease) -> None:
         encoded = json.dumps(action,sort_keys=True,separators=(",",":"))
