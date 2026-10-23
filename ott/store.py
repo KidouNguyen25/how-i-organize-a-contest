@@ -915,6 +915,23 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def count_finished_match_results(self, tid: str) -> int:
+        with self.tx() as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM matches WHERE tournament_id=? AND status='FINISHED'", (tid,)
+            ).fetchone()
+        return int(row[0])
+
+    def iter_finished_match_results(self, tid: str) -> Iterator[sqlite3.Row]:
+        """Stream final results in schedule order for standings calculations."""
+        with self.tx() as con:
+            con.execute("BEGIN")
+            yield from con.execute(
+                "SELECT id,tournament_id,round_no,leg_no,pairing_no,white_entry_id,black_entry_id,status,result "
+                "FROM matches WHERE tournament_id=? AND status='FINISHED' ORDER BY leg_no,round_no,pairing_no",
+                (tid,),
+            )
+
     def user_matches(self, user_id: int, limit: int = 30, *, include_state: bool = True) -> list[dict[str, Any]]:
         projection = self._MATCH_SQL if include_state else "SELECT m.updated_at, " + self._MATCH_SUMMARY_COLUMNS + self._MATCH_FROM_SQL
         sql = (

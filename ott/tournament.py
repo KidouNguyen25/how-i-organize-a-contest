@@ -78,7 +78,7 @@ def byes(entry_ids: list[str], matches: list[dict[str, Any]]) -> list[dict[str, 
     return out
 
 
-def standings(entries: list[dict[str, Any]], matches: Iterable[dict[str, Any]], *,
+def standings(entries: list[dict[str, Any]], matches: Iterable[Any], *,
               matches_in_schedule_order: bool = False,
               matches_are_finished: bool = False,
               matches_count: int | None = None,

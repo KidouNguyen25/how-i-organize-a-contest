@@ -740,8 +740,11 @@ class App:
         @r("GET", "/tournaments/{tid}/standings")
         def get_standings(ctx: Ctx, tid: str) -> Any:
             status = app.get_tournament_status(tid)
-            rows = standings(app.store.list_entries(tid), app.store.list_finished_match_results(tid),
-                             matches_in_schedule_order=True, matches_are_finished=True)
+            entries = app.store.list_entries(tid)
+            matches_count = app.store.count_finished_match_results(tid)
+            with closing(app.store.iter_finished_match_results(tid)) as matches:
+                rows = standings(entries, matches, matches_in_schedule_order=True,
+                                 matches_are_finished=True, matches_count=matches_count)
             return 200, {"items": rows, "status": status}
 
         @r("GET", "/tournaments/{tid}/entries")
