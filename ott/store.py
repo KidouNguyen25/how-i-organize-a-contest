@@ -356,7 +356,6 @@ class Store:
         "SELECT t.*, "
         "(SELECT COUNT(*) FROM entries e WHERE e.tournament_id=t.id AND e.status<>'REMOVED') AS entries_count, "
         "(SELECT COUNT(*) FROM entries e WHERE e.tournament_id=t.id AND e.status='READY') AS ready_count, "
-        "(SELECT COUNT(*) FROM matches m WHERE m.tournament_id=t.id) AS matches_total, "
         "(SELECT COUNT(*) FROM matches m WHERE m.tournament_id=t.id AND m.status='FINISHED') AS matches_finished, "
         "(SELECT COUNT(*) FROM matches m WHERE m.tournament_id=t.id AND m.status IN ('RUNNING','PAUSED')) AS matches_running "
         "FROM tournaments t "
@@ -375,9 +374,16 @@ class Store:
     )
 
     def get_tournament(self, tid: str) -> dict[str, Any] | None:
-        with self.tx() as con:
-            row = con.execute(self._TOUR_SQL + "WHERE t.id = ?", (tid,)).fetchone()
-        return dict(row) if row else None
+        with self._schedule_lock(tid):
+            with self.tx() as con:
+                con.execute("BEGIN")
+                row = con.execute(self._TOUR_SQL + "WHERE t.id = ?", (tid,)).fetchone()
+                if row is None:
+                    return None
+                matches_total = self._cached_schedule_count(tid, con)
+            result = dict(row)
+            result["matches_total"] = matches_total
+            return result
 
     def tournament_exists(self, tid: str) -> bool:
         with self.tx() as con:
@@ -919,19 +925,27 @@ class Store:
 
     def count_match_summaries(self, tid: str) -> int:
         with self._schedule_lock(tid):
-            with self._schedule_count_lock:
-                cached = self._schedule_count_cache.get(tid)
-                if cached is not None:
-                    self._schedule_count_cache.move_to_end(tid)
-                    return cached
-            with self.tx() as con:
-                row = con.execute("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", (tid,)).fetchone()
-            count = int(row[0])
-            with self._schedule_count_lock:
-                self._schedule_count_cache[tid] = count
-                if len(self._schedule_count_cache) > 256:
-                    self._schedule_count_cache.popitem(last=False)
-            return count
+            return self._cached_schedule_count(tid)
+
+    def _cached_schedule_count(self, tid: str, con: sqlite3.Connection | None = None) -> int:
+        with self._schedule_count_lock:
+            cached = self._schedule_count_cache.get(tid)
+            if cached is not None:
+                self._schedule_count_cache.move_to_end(tid)
+                return cached
+        if con is None:
+            with self.tx() as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM matches WHERE tournament_id = ?", (tid,)
+                ).fetchone()
+        else:
+            row = con.execute("SELECT COUNT(*) FROM matches WHERE tournament_id = ?", (tid,)).fetchone()
+        count = int(row[0])
+        with self._schedule_count_lock:
+            self._schedule_count_cache[tid] = count
+            if len(self._schedule_count_cache) > 256:
+                self._schedule_count_cache.popitem(last=False)
+        return count
 
     def list_recent_finished_match_summaries(self, tid: str, limit: int) -> list[dict[str, Any]]:
         """Read latest finished rows through the partial schedule index."""
