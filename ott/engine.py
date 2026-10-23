@@ -22,9 +22,27 @@ _PAWN_STEPS = {
     -1: ((0, -1, True), (-1, -1, True), (1, -1, True), (-1, 1, False), (1, 1, False)),
 }
 _POSITION_ALPHABET = ".0123456789abcdefghijklmn"
-_POSITION_FILE_INDEX = {file: index for index, file in enumerate(FILES)}
 _POSITION_PIECE_INDEX = {piece: index for index, piece in enumerate(PIECES)}
 _POSITION_PROMOTION_INDEX = {None: 0, "rook": 1, "bishop": 2}
+_POSITION_SQUARE_INDEX = {
+    square: rank * 9 + file
+    for rank, row in enumerate(_SQUARES)
+    for file, square in enumerate(row)
+}
+_POSITION_SYMBOLS = {
+    side: {
+        piece: {
+            promotion: _POSITION_ALPHABET[
+                1 + (12 if side == "black" else 0)
+                + 3 * _POSITION_PIECE_INDEX[piece]
+                + _POSITION_PROMOTION_INDEX[promotion]
+            ]
+            for promotion in _POSITION_PROMOTION_INDEX
+        }
+        for piece in PIECES
+    }
+    for side in ("white", "black")
+}
 _MOVE_ACTION_KEYS = frozenset(("type", "from", "to"))
 _PROMOTION_ACTION_KEYS = _MOVE_ACTION_KEYS | {"promotion"}
 
@@ -237,12 +255,10 @@ def legal_actions(state: dict[str, Any], side: str | None = None) -> list[Action
 def position_key(state: dict[str, Any]) -> str:
     """Encode exact board occupancy in 81 cells plus side-to-move."""
     cells = ["."] * 81
+    symbols = _POSITION_SYMBOLS
     for square, piece in state["board"].items():
-        color_offset = 0 if piece["side"] == "white" else 12
-        code = (1 + color_offset + 3 * _POSITION_PIECE_INDEX[piece["piece"]]
-                + _POSITION_PROMOTION_INDEX[piece["promotion"]])
-        index = (ord(square[1]) - ord("1")) * 9 + _POSITION_FILE_INDEX[square[0]]
-        cells[index] = _POSITION_ALPHABET[code]
+        by_promotion = symbols[piece["side"]][piece["piece"]]
+        cells[_POSITION_SQUARE_INDEX[square]] = by_promotion[piece["promotion"]]
     return ("w" if state["side"] == "white" else "b") + "".join(cells)
 
 
