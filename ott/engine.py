@@ -130,6 +130,48 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
     return out
 
 
+def _piece_has_move(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> bool:
+    """Check terminal state without allocating every legal action for a piece."""
+    side = pc["side"]
+    f, r = parse_sq(origin)
+    if pc["piece"] == "king":
+        for dx, dy in EIGHT:
+            nf, nr = f + dx, r + dy
+            if in_board(nf, nr) and _SQUARES[nr][nf] not in board:
+                return True
+        return False
+    if not pc["promotion"]:
+        for dx, dy, can_capture in _PAWN_STEPS[1 if side == "white" else -1]:
+            nf, nr = f + dx, r + dy
+            if not in_board(nf, nr):
+                continue
+            target = board.get(_SQUARES[nr][nf])
+            if target is None or (target["side"] != side and can_capture and _can_capture(pc, target)):
+                return True
+        return False
+
+    slide = ORTHO if pc["promotion"] == "rook" else DIAG
+    for dx, dy in slide:
+        nf, nr = f + dx, r + dy
+        while in_board(nf, nr):
+            target = board.get(_SQUARES[nr][nf])
+            if target is None:
+                return True
+            if target["side"] != side and _can_capture(pc, target):
+                return True
+            break
+    for dx, dy in EIGHT:
+        if (dx, dy) in slide:
+            continue
+        nf, nr = f + dx, r + dy
+        if not in_board(nf, nr):
+            continue
+        target = board.get(_SQUARES[nr][nf])
+        if target is None or (target["side"] != side and _can_capture(pc, target)):
+            return True
+    return False
+
+
 def _add(out: list[Action], origin: str, dest: str, pc: dict[str, Any], dest_rank: int) -> None:
     if pc["piece"] != "king" and not pc["promotion"] and dest_rank == last_rank(pc["side"]):
         out.append({"type": "move", "from": origin, "to": dest, "promotion": "rook"})
@@ -216,7 +258,7 @@ def apply_action(state: dict[str, Any], action: Action) -> dict[str, str] | None
     if state["move_count"] >= MAX_MOVES:
         return {"result": "DRAW", "reason": "MOVE_LIMIT"}
     if not any(
-        _piece_moves(board, origin, pc)
+        _piece_has_move(board, origin, pc)
         for origin, pc in board.items() if pc["side"] == state["side"]
     ):
         return {**win, "reason": "NO_LEGAL_MOVES"}
