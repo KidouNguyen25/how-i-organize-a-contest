@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
+try:
+    import orjson
+except ImportError:
+    orjson = None
+
 from core.languages import LANGUAGES, build_key, language_profile
 from ott import runner
 from ott.adapters import get_adapter
@@ -54,6 +59,15 @@ STATIC_CACHE_MAX_ENTRIES = 64
 MATCH_VIEW_CACHE_MAX_STATE = 256 * 1024
 MATCH_VIEW_CACHE_MAX_BYTES = 2 * 1024 * 1024
 MATCH_VIEW_CACHE_MAX_ENTRIES = 64
+
+
+def _json_bytes(value: Any) -> bytes:
+    if orjson is not None:
+        try:
+            return orjson.dumps(value)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 class StaticFileCache:
@@ -1383,7 +1397,7 @@ class Handler(BaseHTTPRequestHandler):
             ctype, text = payload
             body = text.encode("utf-8")
         elif payload is not None:
-            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            body = _json_bytes(payload)
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -1528,7 +1542,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b": ping\n\n")  # keep-alive through idle proxies / NAT
                 else:
                     for event in batch:
-                        self.wfile.write(b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n")
+                        self.wfile.write(b"data: " + _json_bytes(event) + b"\n\n")
                 self.wfile.flush()
         except (OSError, ValueError):
             pass  # client disconnected
