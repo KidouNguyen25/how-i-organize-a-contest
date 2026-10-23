@@ -94,11 +94,13 @@ def standings(entries: list[dict[str, Any]], matches: Iterable[Any], *,
     rows = list(by_entry.values())
     entry_index = {row["entry_id"]: index for index, row in enumerate(rows)}
     if matches_are_finished:
-        finished = matches if matches_in_schedule_order else list(matches)
+        finished = matches
     else:
-        finished = [m for m in matches if m["status"] == "FINISHED"]
-    if not matches_in_schedule_order:
-        finished.sort(key=lambda m: (m["leg_no"], m["round_no"], m["pairing_no"]))
+        finished = (m for m in matches if m["status"] == "FINISHED")
+    if include_sheet and not matches_in_schedule_order:
+        finished = sorted(finished, key=lambda m: (m["leg_no"], m["round_no"], m["pairing_no"]))
+    elif matches_count is None:
+        finished = list(finished)
     entry_count = len(rows)
     finished_count = matches_count if matches_count is not None else len(finished)
     dense_h2h = entry_count >= 32 and finished_count >= entry_count * (entry_count - 1) // 4

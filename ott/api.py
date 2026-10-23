@@ -1047,7 +1047,7 @@ class App:
                     u["id"], finished_matches_only=True, stream_matches=True)) as inputs:
                 for tournament in inputs:
                     rows = standings(tournament["entries"], tournament["matches"],
-                                     matches_in_schedule_order=True, matches_are_finished=True,
+                                     matches_are_finished=True,
                                      matches_count=tournament["matches_count"], include_sheet=False)
                     mine = next((row for row in rows if row["entry_id"] == tournament["entry_id"]), None)
                     entries.append({"tournament_id": tournament["tournament_id"], "tournament_name": tournament["tournament_name"],

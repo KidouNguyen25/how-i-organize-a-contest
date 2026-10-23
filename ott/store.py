@@ -530,7 +530,7 @@ class Store:
                 "SELECT m.id,m.tournament_id,m.round_no,m.leg_no,m.pairing_no,m.white_entry_id,m.black_entry_id,m.status,m.result "
                 + "FROM entries mine JOIN matches m ON m.tournament_id=mine.tournament_id "
                 "WHERE mine.user_id=? AND mine.status<>'REMOVED'" + finished_filter + " "
-                "ORDER BY mine.status,mine.tournament_id,m.leg_no,m.round_no,m.pairing_no",
+                "ORDER BY mine.status,mine.tournament_id",
                 (user_id,),
             )
             rosters = groupby(roster_cursor, key=lambda row: row["tournament_id"])
