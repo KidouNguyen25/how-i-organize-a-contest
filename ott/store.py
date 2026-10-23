@@ -1043,13 +1043,17 @@ class Store:
         return int(con.execute("SELECT CAST(strftime('%s','now') AS INTEGER)").fetchone()[0])
 
     @staticmethod
-    def _owned(con: sqlite3.Connection, mid: str, lease: Lease | None) -> sqlite3.Row:
+    def _owned(con: sqlite3.Connection, mid: str, lease: Lease | None,
+               fields: tuple[str, ...]) -> sqlite3.Row:
         if lease is None:
             raise LeaseLost("Execution lease is required.")
-        row = con.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone()
-        if (not row or row["status"] != "RUNNING" or row["lease_owner"] != lease.owner
-                or row["lease_epoch"] != lease.epoch
-                or (row["lease_expires_at"] or 0) <= Store._db_now(con)):
+        row = con.execute(
+            f"SELECT {','.join(fields)} FROM matches "
+            "WHERE id=? AND status='RUNNING' AND lease_owner=? AND lease_epoch=? "
+            "AND lease_expires_at>CAST(strftime('%s','now') AS INTEGER)",
+            (mid, lease.owner, lease.epoch),
+        ).fetchone()
+        if row is None:
             raise LeaseLost("Execution lease expired or was replaced.")
         return row
 
@@ -1174,7 +1178,7 @@ class Store:
     def start_execution(self, mid: str, lease: Lease, runtime: dict[str, Any]) -> None:
         with self.tx() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = self._owned(con,mid,lease)
+            row = self._owned(con, mid, lease, ("execution_started", "execution_snapshot"))
             if row["execution_started"]:
                 raise StoreError(409,"RECOVERY_REVIEW","Persistent bot memory cannot be restored automatically.")
             snapshot = json.loads(row["execution_snapshot"])
@@ -1198,7 +1202,7 @@ class Store:
                 (white_ms, black_ms, mid, lease.owner, lease.epoch, white_ms, black_ms),
             ).rowcount
             if updated != 1:
-                row = self._owned(con, mid, lease)
+                row = self._owned(con, mid, lease, ("white_clock_ms", "black_clock_ms"))
                 if white_ms > row["white_clock_ms"] or black_ms > row["black_clock_ms"]:
                     raise StoreError(409, "CLOCK_CONFLICT", "Checkpoint cannot increase a clock.")
                 raise LeaseLost("Execution lease expired or was replaced.")
@@ -1259,12 +1263,14 @@ class Store:
         digest = hashlib.sha256(payload.encode()).hexdigest()
         with self.tx() as con:
             con.execute("BEGIN IMMEDIATE")
-            previous = con.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone()
+            previous = con.execute(
+                "SELECT status,lease_epoch,result_hash FROM matches WHERE id=?", (mid,)
+            ).fetchone()
             if previous and previous["status"] == "FINISHED" and previous["lease_epoch"] == lease.epoch and previous["result_hash"] == digest:
                 attempt = con.execute("SELECT owner FROM match_attempts WHERE match_id=? AND epoch=?", (mid,lease.epoch)).fetchone()
                 if attempt and attempt["owner"] == lease.owner:
                     return
-            row = self._owned(con,mid,lease)
+            row = self._owned(con, mid, lease, ("white_clock_ms", "black_clock_ms", "tournament_id"))
             if clocks["white"] > row["white_clock_ms"] or clocks["black"] > row["black_clock_ms"]:
                 raise StoreError(409,"CLOCK_CONFLICT","Result cannot increase a clock.")
             stamp = self._db_now(con)
@@ -1281,7 +1287,7 @@ class Store:
     def pause_match(self, mid: str, reason: str, *, lease: Lease, retry: bool = False) -> None:
         with self.tx() as con:
             con.execute("BEGIN IMMEDIATE")
-            row = self._owned(con,mid,lease)
+            row = self._owned(con, mid, lease, ("execution_started", "attempt_count", "tournament_id"))
             eligible = retry and not row["execution_started"] and row["attempt_count"] < MAX_ATTEMPTS
             status = "SCHEDULED" if eligible else "PAUSED"
             con.execute("UPDATE matches SET status=?,result_reason=?,available_at=?,timing_uncertainty_ms=NULL,updated_at=? WHERE id=?",
