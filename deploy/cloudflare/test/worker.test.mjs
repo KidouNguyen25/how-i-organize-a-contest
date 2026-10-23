@@ -32,6 +32,17 @@ test('path ngoài allowlist: 404 JSON; method sai: 405', async () => {
   const d = await post('/api/v1/tournaments/t1/hack', '{}'); assert.equal(d.status, 404);
   assert.equal(calls.length, 0);
 });
+test('ops/status và ops/maintenance có route, nhưng mutation vẫn yêu cầu Origin', async () => {
+  const status = await get('/api/v1/ops/status');
+  assert.equal(status.status, 200);
+  assert.equal(calls[0].url, 'https://abc-def.trycloudflare.com/api/v1/ops/status');
+  const mutate = await post('/api/v1/ops/maintenance', '{"enabled":true}', { 'X-CSRF-Token': 'csrf' });
+  assert.equal(mutate.status, 200);
+  assert.equal(calls[1].init.headers.get('x-csrf-token'), 'csrf');
+  const rejected = await post('/api/v1/ops/maintenance', '{"enabled":false}', { Origin: 'https://evil.test' });
+  assert.equal(rejected.status, 403);
+  assert.equal(calls.length, 2);
+});
 test('header: gắn origin key, xóa key/forwarded do client gửi', async () => {
   await get('/api/v1/me', { 'X-Contest-Origin-Key': 'fake', 'X-Forwarded-For': '1.2.3.4', 'X-Forwarded-Host': 'evil', Host: 'evil', Cookie: 'ott_session=s' });
   const h = calls[0].init.headers;
