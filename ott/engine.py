@@ -16,6 +16,10 @@ REPETITION_LIMIT = 3
 ORTHO = ((1, 0), (-1, 0), (0, 1), (0, -1))
 DIAG = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 EIGHT = ORTHO + DIAG
+_PAWN_STEPS = {
+    1: ((0, 1, True), (-1, 1, True), (1, 1, True), (-1, -1, False), (1, -1, False)),
+    -1: ((0, -1, True), (-1, -1, True), (1, -1, True), (-1, 1, False), (1, 1, False)),
+}
 _POSITION_ALPHABET = ".0123456789abcdefghijklmn"
 _POSITION_FILE_INDEX = {file: index for index, file in enumerate(FILES)}
 _POSITION_PIECE_INDEX = {piece: index for index, piece in enumerate(PIECES)}
@@ -79,21 +83,7 @@ def _can_capture(attacker: dict[str, Any], target: dict[str, Any]) -> bool:
 def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list[Action]:
     side = pc["side"]
     f, r = parse_sq(origin)
-    fwd = 1 if side == "white" else -1
     out: list[Action] = []
-
-    def emit(nf: int, nr: int, can_capture: bool) -> bool:
-        """Add destination; return True when the square was empty (slide may continue)."""
-        if not in_board(nf, nr):
-            return False
-        dest = _SQUARES[nr][nf]
-        target = board.get(dest)
-        if target is None:
-            _add(out, origin, dest, pc, nr)
-            return True
-        if target["side"] != side and can_capture and _can_capture(pc, target):
-            _add(out, origin, dest, pc, nr)
-        return False
 
     if pc["piece"] == "king":
         for dx, dy in EIGHT:
@@ -103,12 +93,30 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
                 if dest not in board:
                     _add(out, origin, dest, pc, nr)
     elif not pc["promotion"]:
-        emit(f, r + fwd, True)
-        emit(f - 1, r + fwd, True)
-        emit(f + 1, r + fwd, True)
-        emit(f - 1, r - fwd, False)
-        emit(f + 1, r - fwd, False)
+        for dx, dy, can_capture in _PAWN_STEPS[1 if side == "white" else -1]:
+            nf, nr = f + dx, r + dy
+            if not in_board(nf, nr):
+                continue
+            dest = _SQUARES[nr][nf]
+            target = board.get(dest)
+            if target is None:
+                _add(out, origin, dest, pc, nr)
+            elif target["side"] != side and can_capture and _can_capture(pc, target):
+                _add(out, origin, dest, pc, nr)
     else:
+        def emit(nf: int, nr: int, can_capture: bool) -> bool:
+            """Add destination; return True when the square was empty (slide may continue)."""
+            if not in_board(nf, nr):
+                return False
+            dest = _SQUARES[nr][nf]
+            target = board.get(dest)
+            if target is None:
+                _add(out, origin, dest, pc, nr)
+                return True
+            if target["side"] != side and can_capture and _can_capture(pc, target):
+                _add(out, origin, dest, pc, nr)
+            return False
+
         slide = ORTHO if pc["promotion"] == "rook" else DIAG
         for dx, dy in slide:
             nf, nr = f + dx, r + dy
