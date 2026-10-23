@@ -279,7 +279,8 @@ class App:
         runner.SANDBOX.verify_artifact(cached, expected_source_hash=sha, expected_language=language)
         return cached
 
-    def build_final(self, entry_id: str, bot_id: str, source: str, language: str = "cpp17") -> tuple[bool, str | None]:
+    def build_final(self, entry_id: str, bot_id: str, source: str, language: str = "cpp17", *,
+                    cached_artifact: Path | None = None, cache_checked: bool = False) -> tuple[bool, str | None]:
         """Build an accepted receipt; quota is charged by the fenced caller."""
         self.check_source(source)
         sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
@@ -287,7 +288,9 @@ class App:
         if dest.exists():
             runner.SANDBOX.verify_artifact(dest, expected_source_hash=sha, expected_language=language)
             return True, None
-        cached = self.cached_build(entry_id, source, language)
+        cached = cached_artifact
+        if not cache_checked:
+            cached = self.cached_build(entry_id, source, language)
         if cached is not None:
             runner.SANDBOX.copy_artifact(cached, dest, expected_source_hash=sha, expected_language=language)
             return True, None
@@ -308,10 +311,18 @@ class App:
                 if not entry:
                     raise InfraError("Accepted entry is missing.")
                 dest = artifact_path(self.data_dir, receipt["bot_id"])
-                if not receipt["free_compile"] and self.cached_build(receipt["entry_id"], receipt["source"], receipt["language"]) is None and not dest.exists():
+                cache_checked = False
+                cached_artifact = None
+                if not dest.exists():
+                    cached_artifact = self.cached_build(receipt["entry_id"], receipt["source"], receipt["language"])
+                    cache_checked = True
+                if not receipt["free_compile"] and cached_artifact is None and not dest.exists():
                     self.store.bump_compile(receipt["entry_id"], COMPILE_LIMIT, receipt_id=receipt["id"])
                     charged = True
-                ok, message = self.build_final(receipt["entry_id"], receipt["bot_id"], receipt["source"], receipt["language"])
+                ok, message = self.build_final(
+                    receipt["entry_id"], receipt["bot_id"], receipt["source"], receipt["language"],
+                    cached_artifact=cached_artifact, cache_checked=cache_checked,
+                )
                 if not ok:
                     self.store.fail_submission(receipt["id"], message or "COMPILE_ERROR", compile_lease=compile_lease)
                     return
