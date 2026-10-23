@@ -126,28 +126,29 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
             elif target["side"] != side and can_capture and _can_capture(pc, target):
                 _add(out, origin, dest, pc, nr)
     else:
-        def emit(nf: int, nr: int, can_capture: bool) -> bool:
-            """Add destination; return True when the square was empty (slide may continue)."""
-            if not in_board(nf, nr):
-                return False
-            dest = _SQUARES[nr][nf]
-            target = board.get(dest)
-            if target is None:
-                _add(out, origin, dest, pc, nr)
-                return True
-            if target["side"] != side and can_capture and _can_capture(pc, target):
-                _add(out, origin, dest, pc, nr)
-            return False
-
         slide = ORTHO if pc["promotion"] == "rook" else DIAG
         for dx, dy in slide:
             nf, nr = f + dx, r + dy
-            while emit(nf, nr, True):
-                nf += dx
-                nr += dy
+            while in_board(nf, nr):
+                dest = _SQUARES[nr][nf]
+                target = board.get(dest)
+                if target is None:
+                    _add(out, origin, dest, pc, nr)
+                    nf += dx
+                    nr += dy
+                    continue
+                if target["side"] != side and _can_capture(pc, target):
+                    _add(out, origin, dest, pc, nr)
+                break
         for dx, dy in EIGHT:
             if (dx, dy) not in slide:
-                emit(f + dx, r + dy, True)
+                nf, nr = f + dx, r + dy
+                if not in_board(nf, nr):
+                    continue
+                dest = _SQUARES[nr][nf]
+                target = board.get(dest)
+                if target is None or (target["side"] != side and _can_capture(pc, target)):
+                    _add(out, origin, dest, pc, nr)
     return out
 
 
