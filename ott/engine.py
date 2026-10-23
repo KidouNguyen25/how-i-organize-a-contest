@@ -331,7 +331,7 @@ def apply_action(state: dict[str, Any], action: Action) -> dict[str, str] | None
     win = {"result": "WHITE_WIN" if side == "white" else "BLACK_WIN"}
     if captured and captured["piece"] == "king":
         return {**win, "reason": "KING_CAPTURED"}
-    if not any(p["side"] == other(side) for p in board.values()):
+    if captured and not any(p["side"] == other(side) for p in board.values()):
         return {**win, "reason": "ALL_CAPTURED"}
     key = position_key(state)
     state["positions"][key] = state["positions"].get(key, 0) + 1
