@@ -476,6 +476,16 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_standing_entries(self, tid: str) -> list[dict[str, Any]]:
+        """Read only entry IDs and usernames used to build tournament standings."""
+        with self.tx() as con:
+            rows = con.execute(
+                "SELECT e.id,u.username FROM entries e JOIN users u ON u.id=e.user_id "
+                "WHERE e.tournament_id=? AND e.status<>'REMOVED' ORDER BY e.registered_at,e.id",
+                (tid,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def user_entries(self, user_id: int, *, include_submission_status: bool = False) -> list[dict[str, Any]]:
         projection = self._ENTRY_WITH_SUBMISSION_SQL if include_submission_status else self._ENTRY_SQL
         with self.tx() as con:

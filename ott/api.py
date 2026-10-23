@@ -816,7 +816,7 @@ class App:
             compact = bool(compact_values)
             compact_limit = {"top3": 3, "top6": 6}.get(compact_values[0], 0) if compact else 0
             status = app.get_tournament_status(tid)
-            entries = app.store.list_entries(tid)
+            entries = app.store.list_standing_entries(tid)
             matches_count = app.store.count_finished_match_results(tid)
             with closing(app.store.iter_finished_match_results(tid)) as matches:
                 rows = standings(entries, matches, matches_in_schedule_order=True,
