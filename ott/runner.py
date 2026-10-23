@@ -4,7 +4,6 @@ host processes (dev) or Docker containers (network-less, read-only, resource-lim
 from __future__ import annotations
 
 import json
-import hashlib
 import logging
 import queue
 import subprocess
@@ -49,41 +48,46 @@ def artifact_path(data_dir: Path, bot_id: str) -> Path:
     return data_dir / "artifacts" / bot_id / SANDBOX.exe_name
 
 
-def compile_source(out: Path, source: str) -> tuple[bool, str | None]:
-    """Compile `source` (C++17) to `out` with the active sandbox. Return (ok, filtered compiler message)."""
-    return SANDBOX.compile(out, source)
+def compile_source(out: Path, source: str, language: str = "cpp17") -> tuple[bool, str | None]:
+    """Compile `source` using a fixed language profile to `out` with the active sandbox. Return (ok, filtered compiler message)."""
+    return SANDBOX.compile(out, source) if language == "cpp17" else SANDBOX.compile(out, source, language)
 
 
 def ensure_binary(store: Store, data_dir: Path, bot_id: str) -> Path:
+    """Return the verified binary path for callers that do not need its digest."""
+    return ensure_binary_info(store, data_dir, bot_id)[0]
+
+
+def ensure_binary_info(store: Store, data_dir: Path, bot_id: str) -> tuple[Path, str]:
     """Binary for a submitted bot; rebuild from the stored source if it is missing
-    (e.g. after switching between the local and Docker runner)."""
+    (e.g. after switching between the local and Docker runner), with verified digest."""
     exe = artifact_path(data_dir, bot_id)
     bot = store.get_bot(bot_id, with_source=True)
     if not bot:
         raise InfraError("submitted bot is missing")
     if exe.exists():
-        SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"])
-        return exe
+        manifest = SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"], expected_language=bot["language"])
+        return exe, manifest["binary_sha256"]
     if SANDBOX.kind == "docker":
         raise InfraError("submitted artifact is missing; restore a verified backup or submit a new approved version")
     with _REBUILD_LOCK:
         if exe.exists():
-            SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"])
-            return exe
+            manifest = SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"], expected_language=bot["language"])
+            return exe, manifest["binary_sha256"]
         if not bot or not bot["source"]:
             raise InfraError("binary missing and no source to rebuild it")
         owner = "rebuild-" + uuid.uuid4().hex
         try:
             with store.compile_slot(owner) as token:
-                ok, msg = SANDBOX.compile(exe, bot["source"])
+                ok, msg = compile_source(exe, bot["source"], bot["language"])
                 store.assert_compile_slot(owner,token)
                 if ok:
-                    SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"])
+                    manifest = SANDBOX.verify_artifact(exe, expected_source_hash=bot["source_sha256"], expected_language=bot["language"])
         except LeaseLost as exc:
             raise InfraError("compiler slot unavailable or expired before artifact acceptance") from exc
         if not ok:
             raise InfraError(f"rebuild failed: {(msg or '')[:120]}")
-    return exe
+    return exe, manifest["binary_sha256"]
 
 
 class BotProcess:
@@ -95,12 +99,34 @@ class BotProcess:
         self.stdout_bytes = 0
         self.stderr_bytes = 0
         self.container = f"ott-bot-{uuid.uuid4().hex[:12]}" if SANDBOX.kind == "docker" else None
+        self.write_requests: queue.Queue[tuple[bytes, threading.Event, list[bool]] | None] = queue.Queue(maxsize=1)
+        self.writer_stop = threading.Event()
         self.proc = subprocess.Popen(
             SANDBOX.bot_argv(exe, self.container), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=SANDBOX.cwd(exe), creationflags=CREATE_NO_WINDOW,
         )
         threading.Thread(target=self._read_out, daemon=True).start()
         threading.Thread(target=self._read_err, daemon=True).start()
+        self.writer_thread = threading.Thread(target=self._write_in, daemon=True)
+        self.writer_thread.start()
+
+    def _write_in(self) -> None:
+        while not self.writer_stop.is_set():
+            try:
+                request = self.write_requests.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if request is None:
+                return
+            line, completed, sent = request
+            try:
+                self.proc.stdin.write(line + b"\n")  # type: ignore[union-attr]
+                self.proc.stdin.flush()  # type: ignore[union-attr]
+                sent.append(True)
+            except (OSError, ValueError):
+                pass
+            finally:
+                completed.set()
 
     def wait_ready(self) -> None:
         SANDBOX.wait_ready(self.container)
@@ -142,20 +168,18 @@ class BotProcess:
         except (OSError, ValueError):
             pass
 
-    def send(self, line: str, timeout: float = 1.0) -> bool:
+    def send(self, line: str | bytes, timeout: float = 1.0) -> bool:
+        if self.writer_stop.is_set():
+            return False
+        payload = line.encode("utf-8") if isinstance(line, str) else line
+        deadline = time.monotonic() + max(0.001, timeout)
         completed = threading.Event()
         sent = []
-        def write() -> None:
-            try:
-                self.proc.stdin.write(line.encode("utf-8") + b"\n")  # type: ignore[union-attr]
-                self.proc.stdin.flush()  # type: ignore[union-attr]
-                sent.append(True)
-            except (OSError, ValueError):
-                pass
-            finally:
-                completed.set()
-        threading.Thread(target=write,daemon=True).start()
-        return completed.wait(timeout=max(0.001,timeout)) and bool(sent)
+        try:
+            self.write_requests.put_nowait((payload, completed, sent))
+        except queue.Full:
+            return False
+        return completed.wait(timeout=max(0.0, deadline - time.monotonic())) and bool(sent)
 
     def has_pending(self) -> bool:
         return not self.q.empty()
@@ -164,6 +188,13 @@ class BotProcess:
         try:
             self.proc.kill()
         except OSError:
+            pass
+        self.writer_stop.set()
+        try:
+            pending = self.write_requests.get_nowait()
+            if pending is not None:
+                pending[1].set()
+        except queue.Empty:
             pass
         SANDBOX.kill(self.container)
         try:
@@ -179,6 +210,7 @@ class BotProcess:
             self.proc.wait(timeout=5)  # reap the process / docker client
         except (subprocess.TimeoutExpired, OSError):
             pass
+        self.writer_thread.join(timeout=1)
 
 
 class MatchRunner:
@@ -191,12 +223,16 @@ class MatchRunner:
         self.heartbeat_stop = threading.Event()
 
     def _heartbeat(self) -> None:
-        while not self.heartbeat_stop.wait(5):
-            try:
-                self.store.heartbeat(self.mid,self.lease)
-            except Exception:
-                self.lease_lost.set()
-                return
+        self.store.enable_thread_connection_reuse()
+        try:
+            while not self.heartbeat_stop.wait(5):
+                try:
+                    self.store.heartbeat(self.mid,self.lease)
+                except Exception:
+                    self.lease_lost.set()
+                    return
+        finally:
+            self.store.close_thread_connection()
 
     def _check_control(self) -> None:
         if self.lease_lost.is_set():
@@ -205,6 +241,7 @@ class MatchRunner:
             raise InfraError("worker shutdown")
 
     def run(self) -> None:
+        self.store.enable_thread_connection_reuse()
         bots: dict[str, BotProcess] = {}
         heartbeat = threading.Thread(target=self._heartbeat,daemon=True,name=f"lease-{self.mid[:8]}")
         try:
@@ -226,10 +263,10 @@ class MatchRunner:
                 if not frozen or not frozen["bot_submission_id"]:
                     raise InfraError("immutable bot reference is missing")
                 bot = self.store.get_bot(frozen["bot_submission_id"],with_source=True)
-                if not bot or bot["source_sha256"] != frozen["source_sha256"]:
-                    raise InfraError("submitted source hash differs from execution snapshot")
-                exes[side] = ensure_binary(self.store,self.data_dir,frozen["bot_submission_id"])
-                artifacts[side] = hashlib.sha256(exes[side].read_bytes()).hexdigest()
+                if (not bot or bot["source_sha256"] != frozen["source_sha256"]
+                        or bot["language"] != frozen.get("language", "cpp17")):
+                    raise InfraError("submitted source hash or language differs from execution snapshot")
+                exes[side], artifacts[side] = ensure_binary_info(self.store,self.data_dir,frozen["bot_submission_id"])
             self._check_control()
             self.store.start_execution(self.mid,self.lease,{
                 "kind":SANDBOX.kind,"image":getattr(SANDBOX,"image",None),
@@ -254,13 +291,16 @@ class MatchRunner:
             except Exception:
                 LOG.exception("could not persist pause for match %s",self.mid)
         finally:
-            self.heartbeat_stop.set()
-            for bot in bots.values():
-                bot.kill()
-            while heartbeat.is_alive():
-                heartbeat.join(timeout=1)
-            with LIVE_LOCK:
-                LIVE.pop(self.mid,None)
+            try:
+                self.heartbeat_stop.set()
+                for bot in bots.values():
+                    bot.kill()
+                while heartbeat.is_alive():
+                    heartbeat.join(timeout=1)
+                with LIVE_LOCK:
+                    LIVE.pop(self.mid,None)
+            finally:
+                self.store.close_thread_connection()
 
     def _lose(self, side: str, reason: str) -> dict[str, str]:
         return self.adapter.loss(side,reason)
@@ -289,13 +329,13 @@ class MatchRunner:
             if clocks[side] <= 0:
                 return self._lose(side,"TIMEOUT")
             observation = self.adapter.observation(state,side,self.mid,clocks)
-            line = json.dumps(observation,separators=(",",":"))
-            if len(line.encode("utf-8")) > MAX_LINE:
+            payload = json.dumps(observation,separators=(",",":")).encode("utf-8")
+            if len(payload) > MAX_LINE:
                 raise InfraError("adapter observation exceeds protocol size")
             started = time.monotonic()
             with LIVE_LOCK:
                 LIVE[self.mid] = {"side":side,"since":started,"clocks":dict(clocks)}
-            sent = bot.send(line,timeout=min(1.0,clocks[side]/1000))
+            sent = bot.send(payload,timeout=min(1.0,clocks[side]/1000))
             self._check_control()
             if not sent:
                 clocks[side] = max(0,clocks[side]-int((time.monotonic()-started)*1000))

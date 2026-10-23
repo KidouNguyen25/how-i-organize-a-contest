@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -20,8 +21,9 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
 
+from core.languages import LANGUAGES, language_profile, valid_jar
+
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
-COMPILE_TIMEOUT = 15
 COMPILE_OUTER_TIMEOUT = 60
 IMAGE = "ott-bot-runner"
 RUN_MEMORY_MB = 256
@@ -32,15 +34,6 @@ MAX_SOURCE_BYTES = 256 * 1024
 MAX_BINARY_BYTES = 64 * 1024 * 1024
 MAX_COMPILER_OUTPUT_BYTES = 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 4096
-COMPILE_FLAGS = ("-std=c++17", "-O2", "-pipe")
-
-# Only this fixed program is passed to a shell. No source, path or user input is interpolated.
-_COMPILE_PROGRAM = (
-    "timeout --signal=KILL 15s g++ -std=c++17 -O2 -pipe -o /build/bot /src/bot.cpp 1>&2; "
-    "status=$?; if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi; "
-    "test -f /build/bot && test ! -L /build/bot || exit 126; "
-    "exec cat /build/bot"
-)
 
 
 class InfraError(Exception):
@@ -85,7 +78,8 @@ def _manifest_path(exe: Path) -> Path:
     return exe.with_name(exe.name + ".manifest.json")
 
 
-def _hash_binary(exe: Path, *, linux: bool) -> tuple[str, int]:
+def _hash_binary(exe: Path, *, linux: bool, artifact_format: str = "native",
+                 main_class: str | None = None) -> tuple[str, int]:
     exe = _checked_path(exe)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
@@ -94,8 +88,13 @@ def _hash_binary(exe: Path, *, linux: bool) -> tuple[str, int]:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_BINARY_BYTES:
                 raise InfraError("artifact must be a nonempty regular file no larger than 64 MiB")
+            if artifact_format == "jar":
+                stream.seek(0)
+                if not main_class or not valid_jar(stream, main_class):
+                    raise InfraError("artifact is not a valid JAR with the expected main class")
+                stream.seek(0)
             header = stream.read(64)
-            if linux:
+            if artifact_format != "jar" and linux:
                 if (len(header) < 52 or header[:4] != b"\x7fELF" or header[4] not in (1, 2)
                         or header[5] not in (1, 2) or header[6] != 1
                         or (header[4] == 2 and len(header) < 64)):
@@ -103,7 +102,7 @@ def _hash_binary(exe: Path, *, linux: bool) -> tuple[str, int]:
                 byteorder = "little" if header[5] == 1 else "big"
                 if int.from_bytes(header[16:18], byteorder) not in (2, 3):
                     raise InfraError("ELF artifact must be an executable or position-independent executable")
-            if not linux and header[:2] != b"MZ":
+            if artifact_format != "jar" and not linux and header[:2] != b"MZ":
                 raise InfraError("local Windows artifact is not an executable")
             digest = hashlib.sha256(header)
             count = len(header)
@@ -179,11 +178,12 @@ def _publish_artifact(source: Path, dest: Path, manifest: dict[str, Any]) -> Non
 
 
 def _bounded_process(args: list[str], *, binary_output: Any = None, cwd: str | None = None,
-                     kill_container: Any = None, timeout: float = COMPILE_OUTER_TIMEOUT) -> tuple[int, str, str | None]:
+                     kill_container: Any = None, timeout: float = COMPILE_OUTER_TIMEOUT,
+                     env: dict[str, str] | None = None) -> tuple[int, str, str | None]:
     """Drain pipes in bounded chunks; compiler diagnostics never accumulate unboundedly."""
     try:
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                cwd=cwd, creationflags=CREATE_NO_WINDOW, start_new_session=os.name == "posix")
+                                cwd=cwd, env=env, creationflags=CREATE_NO_WINDOW, start_new_session=os.name == "posix")
     except OSError as exc:
         raise InfraError(f"compiler process unavailable: {exc.strerror or type(exc).__name__}") from None
     chunks: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=8)
@@ -327,7 +327,8 @@ class _ArtifactPolicy:
                 "runtime_image_id": getattr(self, "runtime_image_id", None)}
 
     @_filesystem_errors
-    def verify_artifact(self, exe: Path, expected_source_hash: str | None = None) -> dict[str, Any]:
+    def verify_artifact(self, exe: Path, expected_source_hash: str | None = None,
+                        expected_language: str | None = None) -> dict[str, Any]:
         exe = _checked_path(exe)
         path = _checked_path(_manifest_path(exe))
         try:
@@ -345,29 +346,51 @@ class _ArtifactPolicy:
             raise InfraError("artifact does not match the selected source")
         if self.allowed_source_hashes is not None and source_hash not in self.allowed_source_hashes:
             raise InfraError("artifact source is outside the approved demo allowlist")
-        if manifest.get("compile_flags") != list(COMPILE_FLAGS):
+        language = manifest.get("language", "cpp17")
+        try:
+            profile = language_profile(language)
+        except ValueError:
+            raise InfraError("artifact language is not supported") from None
+        if expected_language is not None and language != expected_language:
+            raise InfraError("artifact language does not match the selected submission")
+        if manifest.get("compile_flags") != list(profile.flags):
             raise InfraError("artifact compiler flags mismatch")
+        if manifest.get("artifact_format", "native") != profile.artifact_format:
+            raise InfraError("artifact format mismatch")
+        if manifest.get("compile_environment", []) != [list(item) for item in profile.environment]:
+            raise InfraError("artifact compiler environment mismatch")
         if self.kind == "docker":
             self._ensure_images()
             if (manifest.get("compiler_image_id") != self.compiler_image_id
                     or manifest.get("runtime_image_id") != self.runtime_image_id):
                 raise InfraError("artifact image mismatch; create a new approved build")
-        binary_hash, binary_size = _hash_binary(exe, linux=self.kind == "docker" or os.name == "posix")
+        binary_hash, binary_size = _hash_binary(
+            exe, linux=self.kind == "docker" or os.name == "posix",
+            artifact_format=profile.artifact_format, main_class=profile.main_class,
+        )
         if manifest.get("binary_sha256") != binary_hash or manifest.get("binary_size") != binary_size:
             raise InfraError("artifact integrity check failed")
         return manifest
 
     @_filesystem_errors
-    def copy_artifact(self, source: Path, dest: Path, expected_source_hash: str | None = None) -> dict[str, Any]:
-        manifest = self.verify_artifact(source, expected_source_hash)
+    def copy_artifact(self, source: Path, dest: Path, expected_source_hash: str | None = None,
+                      expected_language: str | None = None) -> dict[str, Any]:
+        manifest = self.verify_artifact(source, expected_source_hash, expected_language)
         _publish_artifact(_checked_path(source), dest, manifest)
-        return self.verify_artifact(dest, expected_source_hash)
+        return self.verify_artifact(dest, expected_source_hash, expected_language)
 
-    def _manifest(self, exe: Path, source: str) -> dict[str, Any]:
-        digest, size = _hash_binary(exe, linux=self.kind == "docker" or os.name == "posix")
+    def _manifest(self, exe: Path, source: str, language: str = "cpp17") -> dict[str, Any]:
+        profile = language_profile(language)
+        digest, size = _hash_binary(
+            exe, linux=self.kind == "docker" or os.name == "posix",
+            artifact_format=profile.artifact_format, main_class=profile.main_class,
+        )
         return {"schema_version": 1, "sandbox_kind": self.kind,
                 "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-                "binary_sha256": digest, "binary_size": size, "compile_flags": list(COMPILE_FLAGS),
+                "binary_sha256": digest, "binary_size": size, "language": language,
+                "artifact_format": profile.artifact_format,
+                "compile_flags": list(profile.flags),
+                "compile_environment": [list(item) for item in profile.environment],
                 "compiler_image_id": getattr(self, "compiler_image_id", None),
                 "runtime_image_id": getattr(self, "runtime_image_id", None)}
 
@@ -385,32 +408,61 @@ class LocalSandbox(_ArtifactPolicy):
         return "bot.exe" if sys.platform == "win32" else "bot"
 
     def available(self) -> tuple[bool, str]:
-        ok = bool(shutil.which("g++") or shutil.which("c++"))
-        return ok, "g++ found (unisolated development mode)" if ok else "g++ not found on PATH"
+        found = [profile.compiler for profile in LANGUAGES.values()
+                 if shutil.which(profile.compiler)
+                 and (not profile.runtime or shutil.which(profile.runtime[0]))
+                 and (profile.artifact_format != "jar" or shutil.which("jar"))]
+        if not found and shutil.which("c++"):
+            found.append("c++")
+        return bool(found), (", ".join(found) + " found (unisolated development mode)"
+                             if found else "No supported compiler toolchain found on PATH")
 
     @_filesystem_errors
-    def compile(self, out: Path, source: str) -> tuple[bool, str | None]:
+    def compile(self, out: Path, source: str, language: str = "cpp17") -> tuple[bool, str | None]:
         self.check_source(source)
-        compiler = shutil.which("g++") or shutil.which("c++")
+        profile = language_profile(language)
+        compiler = shutil.which(profile.compiler)
+        if language == "cpp17" and not compiler:
+            compiler = shutil.which("c++")
         if not compiler:
-            raise InfraError("g++ not found on PATH")
+            raise InfraError(f"{profile.compiler} not found on PATH")
         _checked_path(out)
         with tempfile.TemporaryDirectory(prefix="ott-cc-") as tmp:
-            src, built = Path(tmp) / "bot.cpp", Path(tmp) / self.exe_name
+            src, built = Path(tmp) / profile.filename, Path(tmp) / self.exe_name
+            compile_output = Path(tmp) / "classes" if profile.artifact_format == "jar" else built
+            if profile.artifact_format == "jar":
+                compile_output.mkdir()
             src.write_bytes(source.encode("utf-8"))
+            command = profile.command(str(src), str(compile_output))
+            command[0] = compiler
             code, diagnostic, failure = _bounded_process(
-                [compiler, *COMPILE_FLAGS, "-o", str(built), str(src)], cwd=tmp, timeout=COMPILE_TIMEOUT)
+                command, cwd=tmp, timeout=profile.compile_timeout_seconds,
+                env={**os.environ, **dict(profile.environment)})
             if failure is not None:
                 return False, failure
             if code != 0:
                 return False, _clean_compiler_output(diagnostic or "compile failed", str(src), tmp)
+            if profile.artifact_format == "jar":
+                if not (compile_output / "Main.class").is_file():
+                    return False, "Java source must declare Main in the default package."
+                package = profile.package_command(str(compile_output), str(built))
+                packager = shutil.which(package[0])
+                if not packager:
+                    raise InfraError("jar not found on PATH")
+                package[0] = packager
+                code, diagnostic, failure = _bounded_process(package, cwd=tmp, timeout=10)
+                if failure is not None:
+                    return False, failure
+                if code != 0:
+                    return False, _clean_compiler_output(diagnostic or "compile failed", tmp)
             self.check_source(source)
-            _publish_artifact(built, out, self._manifest(built, source))
+            _publish_artifact(built, out, self._manifest(built, source, language))
         return True, None
 
     def bot_argv(self, exe: Path, container: str | None = None) -> list[str]:
-        self.verify_artifact(exe)
-        return [str(_checked_path(exe))]
+        manifest = self.verify_artifact(exe)
+        profile = language_profile(manifest["language"])
+        return profile.run_command(str(_checked_path(exe)))
 
     def cwd(self, exe: Path) -> str | None:
         return str(exe.parent)
@@ -486,24 +538,46 @@ class DockerSandbox(_ArtifactPolicy):
                 "--ulimit=nofile=64:64", "--ulimit=fsize=67108864:67108864", "--ulimit=core=0", "--env=HOME=/tmp"]
 
     @_filesystem_errors
-    def compile(self, out: Path, source: str) -> tuple[bool, str | None]:
+    def compile(self, out: Path, source: str, language: str = "cpp17") -> tuple[bool, str | None]:
         self.check_source(source)
+        profile = language_profile(language)
         self._ensure_images()
         _checked_path(out)
         name = f"ott-cc-{uuid.uuid4().hex[:12]}"
         with tempfile.TemporaryDirectory(prefix="ott-cc-") as tmp:
             src_dir, built = Path(tmp) / "src", Path(tmp) / "bot"
             src_dir.mkdir(mode=0o755)
-            src = src_dir / "bot.cpp"
+            src = src_dir / profile.filename
             src.write_bytes(source.encode("utf-8"))
             os.chmod(src, 0o444)
             src_dir = _checked_path(src_dir)
             if "," in str(src_dir):
                 raise InfraError("Docker mount path must not contain a comma")
-            args = self.run_args(name, memory_mb=COMPILE_MEMORY_MB, pids=COMPILE_PIDS, tmp_mb=64, tmp_exec=True)
+            args = self.run_args(name, memory_mb=COMPILE_MEMORY_MB, pids=COMPILE_PIDS,
+                                 tmp_mb=profile.compile_tmp_mb, tmp_exec=True)
+            for key, value in profile.environment:
+                args += ["--env", f"{key}={value}"]
+            if profile.artifact_format == "jar":
+                command = shlex.join(profile.command("/src/" + profile.filename, "/tmp/classes"))
+                package = shlex.join(profile.package_command("/tmp/classes", "/build/bot"))
+                program = (
+                    "mkdir -p /tmp/classes && "
+                    f"timeout --signal=KILL {profile.compile_timeout_seconds}s {command} 1>&2; "
+                    'status=$?; if [ "$status" -ne 0 ]; then exit "$status"; fi; '
+                    'test -f /tmp/classes/Main.class || exit 1; '
+                    f"{package} 1>&2; status=$?; if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi; "
+                    'test -f /build/bot && test ! -L /build/bot || exit 126; exec cat /build/bot'
+                )
+            else:
+                command = shlex.join(profile.command("/src/" + profile.filename, "/build/bot"))
+                program = (
+                    f"timeout --signal=KILL {profile.compile_timeout_seconds}s {command} 1>&2; "
+                    'status=$?; if [ "$status" -ne 0 ]; then exit "$status"; fi; '
+                    'test -f /build/bot && test ! -L /build/bot || exit 126; exec cat /build/bot'
+                )
             args += ["--tmpfs=/build:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=65534,gid=65534",
                      "--mount", f"type=bind,src={src_dir},dst=/src,readonly",
-                     self.compiler_image_id, "sh", "-c", _COMPILE_PROGRAM]
+                     self.compiler_image_id, "sh", "-c", program]
             with built.open("wb") as binary:
                 code, diagnostic, failure = _bounded_process(args, binary_output=binary,
                                                             kill_container=lambda: self.kill(name))
@@ -512,7 +586,7 @@ class DockerSandbox(_ArtifactPolicy):
             if failure is not None:
                 return False, failure
             if code == 124:
-                return False, f"Compile timed out after {COMPILE_TIMEOUT}s."
+                return False, f"Compile timed out after {profile.compile_timeout_seconds}s."
             if code == 137:
                 return False, "Compiler exceeded its time or resource limit."
             if code in (125, 126, 127):
@@ -520,18 +594,20 @@ class DockerSandbox(_ArtifactPolicy):
             if code != 0:
                 return False, _clean_compiler_output(diagnostic or "compile failed", "/src/", tmp)
             self.check_source(source)
-            _publish_artifact(built, out, self._manifest(built, source))
+            _publish_artifact(built, out, self._manifest(built, source, language))
         return True, None
 
     def bot_argv(self, exe: Path, container: str | None = None) -> list[str]:
-        self.verify_artifact(exe)
+        manifest = self.verify_artifact(exe)
+        profile = language_profile(manifest["language"])
         exe = _checked_path(exe)
         if "," in str(exe):
             raise InfraError("Docker mount path must not contain a comma")
         name = container or f"ott-bot-{uuid.uuid4().hex[:12]}"
         args = self.run_args(name, memory_mb=RUN_MEMORY_MB, pids=RUN_PIDS, tmp_mb=16, tmp_exec=False)
         args.insert(args.index("--rm") + 1, "-i")
-        return args + ["--mount", f"type=bind,src={exe},dst=/bot/bot,readonly", self.runtime_image_id, "/bot/bot"]
+        return args + ["--mount", f"type=bind,src={exe},dst=/bot/bot,readonly",
+                       self.runtime_image_id, *profile.run_command("/bot/bot")]
 
     def cwd(self, exe: Path) -> str | None:
         return None

@@ -2,7 +2,8 @@
 
 Events are small change notifications (ids and counters only, never boards or secrets).
 Each subscriber keeps only the latest event per (type, id) and receives them in short batches,
-so a burst of moves costs one message per match per ~80 ms window.
+so a burst of moves costs one message per match per ~80 ms window. The pending buffer is capped;
+overflow becomes one full-refresh event so slow clients cannot retain unbounded match IDs.
 """
 
 from __future__ import annotations
@@ -13,17 +14,27 @@ from typing import Any
 
 COALESCE_S = 0.08
 MAX_CLIENTS = 300
+MAX_PENDING_EVENTS = 256
 
 
 class Subscriber:
     def __init__(self) -> None:
         self._cv = threading.Condition()
         self._pending: dict[tuple[str, str | None], dict[str, Any]] = {}
+        self._resync_needed = False
         self.closed = False
 
     def put(self, event: dict[str, Any]) -> None:
         with self._cv:
-            self._pending[(event["type"], event.get("id"))] = event  # latest wins
+            if self._resync_needed:
+                return
+            key = (event["type"], event.get("id"))
+            if key in self._pending or len(self._pending) < MAX_PENDING_EVENTS:
+                self._pending[key] = event  # latest wins
+            else:
+                self._pending.clear()
+                self._pending[("hello", None)] = {"type": "hello"}
+                self._resync_needed = True
             self._cv.notify()
 
     def close(self) -> None:
@@ -42,6 +53,7 @@ class Subscriber:
         with self._cv:
             batch = list(self._pending.values())
             self._pending.clear()
+            self._resync_needed = False
         return batch
 
 

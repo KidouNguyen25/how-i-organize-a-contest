@@ -18,40 +18,37 @@ class DoubleRoundRobinGenerator(BaseFormatGenerator):
 
     def generate_tasks(self, snapshot: SeasonSnapshot, entries: list[Entry]) -> list[EvaluationTask]:
         entry_ids = [e.entry_id for e in entries]
-        slots: list[str | None] = list(entry_ids)
+        snapshot_hash: str | None = None
+        slots: list[int | None] = list(range(len(entries)))
         if len(slots) % 2 != 0:
             slots.append(None)  # Add bye placeholder
         
         n = len(slots)
-        rounds: list[list[tuple[str | None, str | None]]] = []
-        rotation = slots[:]
-        for _ in range(n - 1):
-            rounds.append([(rotation[i], rotation[n - 1 - i]) for i in range(n // 2)])
-            rotation = [rotation[0], rotation[-1]] + rotation[1:-1]
-
-        order = {eid: i for i, eid in enumerate(entry_ids)}
         tasks: list[EvaluationTask] = []
-        task_counter = 0
 
         for leg in (1, 2):
-            for r_idx, pairs in enumerate(rounds, start=1):
+            rotation = slots[:]
+            for r_idx in range(1, n):
                 pairing = 0
-                for a, b in pairs:
+                for i in range(n // 2):
+                    a, b = rotation[i], rotation[n - 1 - i]
                     if a is None or b is None:
                         continue  # Bye round
                     pairing += 1
-                    task_counter += 1
-                    first, second = (a, b) if order[a] < order[b] else (b, a)
-                    white_id, black_id = (first, second) if leg == 1 else (second, first)
+                    first, second = (a, b) if a < b else (b, a)
+                    white_idx, black_idx = (first, second) if leg == 1 else (second, first)
+                    white_id, black_id = entry_ids[white_idx], entry_ids[black_idx]
 
                     # Lookup selected submissions
-                    white_entry = next(e for e in entries if e.entry_id == white_id)
-                    black_entry = next(e for e in entries if e.entry_id == black_id)
+                    white_entry = entries[white_idx]
+                    black_entry = entries[black_idx]
+                    if snapshot_hash is None:
+                        snapshot_hash = snapshot.compute_hash()
 
                     tasks.append(EvaluationTask(
                         task_id=f"{snapshot.season_id}-match-L{leg}-R{r_idx}-P{pairing}",
                         season_id=snapshot.season_id,
-                        snapshot_hash=snapshot.compute_hash(),
+                        snapshot_hash=snapshot_hash,
                         adapter_id=snapshot.adapter_id,
                         adapter_version=snapshot.adapter_version,
                         attempt_no=1,
@@ -78,6 +75,7 @@ class DoubleRoundRobinGenerator(BaseFormatGenerator):
                         },
                         seed=1000 * leg + 100 * r_idx + pairing
                     ))
+                rotation.insert(1, rotation.pop())
         return tasks
 
 
@@ -86,13 +84,16 @@ class DirectTaskQueueGenerator(BaseFormatGenerator):
 
     def generate_tasks(self, snapshot: SeasonSnapshot, entries: list[Entry]) -> list[EvaluationTask]:
         tasks: list[EvaluationTask] = []
+        snapshot_hash: str | None = None
         for idx, entry in enumerate(entries, start=1):
             if not entry.selected_submission_id:
                 continue
+            if snapshot_hash is None:
+                snapshot_hash = snapshot.compute_hash()
             tasks.append(EvaluationTask(
                 task_id=f"{snapshot.season_id}-eval-task-{idx}",
                 season_id=snapshot.season_id,
-                snapshot_hash=snapshot.compute_hash(),
+                snapshot_hash=snapshot_hash,
                 adapter_id=snapshot.adapter_id,
                 adapter_version=snapshot.adapter_version,
                 attempt_no=1,

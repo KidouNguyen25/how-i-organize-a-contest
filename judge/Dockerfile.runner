@@ -1,7 +1,17 @@
-FROM debian:bookworm-slim
+ARG BASE_IMAGE=debian:bookworm-slim
+FROM ${BASE_IMAGE} AS base
+WORKDIR /tmp
+
+FROM base AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libstdc++6 openjdk-17-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+USER 65534:65534
+
+FROM base AS compiler
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends g++ \
+    && apt-get install -y --no-install-recommends g++ gcc rustc golang-go libc6-dev openjdk-17-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp

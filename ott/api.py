@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import hmac
 import json
 import logging
+import math
 import mimetypes
 import re
 import shutil
@@ -14,13 +16,15 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from collections import OrderedDict
+from contextlib import closing, contextmanager
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from core.languages import LANGUAGES, build_key, language_profile
 from ott import runner
 from ott.adapters import get_adapter
 from ott.operations import maintenance_enabled, readiness, set_maintenance
@@ -29,17 +33,132 @@ from ott.sandbox import SourcePolicyError
 from ott.events import HUB
 from ott.runner import LIVE, LIVE_LOCK, InfraError, artifact_path, compile_source
 from ott.store import LeaseLost, Store, StoreError
-from ott.tournament import Dispatcher, byes, round_robin, standings
+from ott.tournament import Dispatcher, byes, iter_round_robin_rows, standings
 
 LOG = logging.getLogger("ott.api")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 MAX_BODY = 1024 * 1024
 MAX_SOURCE = 256 * 1024
+MAX_JSON_DEPTH = 64
+_JSON_MARKERS = re.compile(rb'["\\{}\[\]]')
+_JSON_STRING = re.compile(rb'"[^"\\]*+(?:\\.[^"\\]*+)*+"', re.DOTALL)
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "samples" / "bot_template.cpp"
 CODING_MIN, CODING_MAX = 1, 240
 COMPILE_LIMIT = 10
 CLOCKS = (300, 600, 3600)
 CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'"
+STATIC_CACHE_MAX_FILE = 1024 * 1024
+STATIC_CACHE_MAX_BYTES = 8 * 1024 * 1024
+STATIC_CACHE_MAX_ENTRIES = 64
+MATCH_VIEW_CACHE_MAX_STATE = 256 * 1024
+MATCH_VIEW_CACHE_MAX_BYTES = 2 * 1024 * 1024
+MATCH_VIEW_CACHE_MAX_ENTRIES = 64
+
+
+class StaticFileCache:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[str, tuple[tuple[int, ...], bytes, str]] = OrderedDict()
+        self._size = 0
+
+    def read(self, path: Path) -> tuple[bytes, str]:
+        stat = path.stat()
+        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        key = str(path)
+        with self._lock:
+            cached = self._entries.get(key)
+            if cached and cached[0] == signature:
+                self._entries.move_to_end(key)
+                return cached[1], cached[2]
+            if cached:
+                del self._entries[key]
+                self._size -= len(cached[1])
+
+        data = path.read_bytes()
+        etag = '"' + hashlib.sha256(data).hexdigest() + '"'
+        if len(data) <= STATIC_CACHE_MAX_FILE:
+            with self._lock:
+                cached = self._entries.get(key)
+                if cached and cached[0] == signature:
+                    self._entries.move_to_end(key)
+                    return cached[1], cached[2]
+                if cached:
+                    del self._entries[key]
+                    self._size -= len(cached[1])
+                self._entries[key] = (signature, data, etag)
+                self._size += len(data)
+                while self._size > STATIC_CACHE_MAX_BYTES or len(self._entries) > STATIC_CACHE_MAX_ENTRIES:
+                    _, evicted = self._entries.popitem(last=False)
+                    self._size -= len(evicted[1])
+        return data, etag
+
+
+class MatchViewCache:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple[str, bool], tuple[tuple[str, str, int], dict[str, Any], int]] = OrderedDict()
+        self._size = 0
+
+    def get(self, match_id: str, game_id: str, game_version: str, state_version: int,
+            *, with_moves: bool = True) -> dict[str, Any] | None:
+        key = (game_id, game_version, state_version)
+        cache_id = (match_id, with_moves)
+        with self._lock:
+            cached = self._entries.get(cache_id)
+            if not cached:
+                return None
+            if cached[0] == key:
+                self._entries.move_to_end(cache_id)
+                return cached[1]
+            if cached[0][2] > state_version:
+                return None
+            del self._entries[cache_id]
+            self._size -= cached[2]
+            return None
+
+    def put(self, match_id: str, game_id: str, game_version: str, state_version: int,
+            view: dict[str, Any], weight: int, *, with_moves: bool = True) -> dict[str, Any]:
+        if weight > MATCH_VIEW_CACHE_MAX_STATE or weight > MATCH_VIEW_CACHE_MAX_BYTES:
+            return view
+        key = (game_id, game_version, state_version)
+        cache_id = (match_id, with_moves)
+        with self._lock:
+            cached = self._entries.get(cache_id)
+            if cached and cached[0] == key:
+                self._entries.move_to_end(cache_id)
+                return cached[1]
+            if cached and cached[0][2] > state_version:
+                return view
+            if cached:
+                del self._entries[cache_id]
+                self._size -= cached[2]
+            self._entries[cache_id] = (key, view, weight)
+            self._size += weight
+            while self._size > MATCH_VIEW_CACHE_MAX_BYTES or len(self._entries) > MATCH_VIEW_CACHE_MAX_ENTRIES:
+                _, evicted = self._entries.popitem(last=False)
+                self._size -= evicted[2]
+        return view
+
+
+def _json_string_end(raw: bytes, start: int) -> int:
+    """Skip ordinary strings with native searches; bound probes before regex fallback."""
+    position = start + 1
+    for _ in range(8):
+        end = raw.find(b'"', position)
+        if end < 0:
+            raise ApiError(400, "BAD_REQUEST", "Body must be valid JSON.")
+        back = end - 1
+        while back > start and raw[back] == 92 and end - back <= 8:
+            back -= 1
+        if end - back > 8:
+            break
+        if (end - back) % 2:
+            return end + 1
+        position = end + 1
+    string = _JSON_STRING.match(raw, start)
+    if string is None:
+        raise ApiError(400, "BAD_REQUEST", "Body must be valid JSON.")
+    return string.end()
 
 
 class ApiError(Exception):
@@ -59,12 +178,16 @@ class App:
     def __init__(self, store: Store, data_dir: Path, static_dir: Path, secure_cookie: bool, workers: int,
                  policy: ServerPolicy | None = None) -> None:
         self.store, self.data_dir, self.static_dir, self.secure_cookie = store, data_dir, static_dir, secure_cookie
+        self.static_cache = StaticFileCache()
+        self.match_view_cache = MatchViewCache()
         self.policy = policy or ServerPolicy()
         self.secure_cookie = secure_cookie or bool(self.policy.origin_keys)
         if self.policy.demo:
             info = runner.SANDBOX.policy_info()
             if info["kind"] != "docker" or info["source_policy"] != "allowlist" or not info["allowed_source_count"]:
                 raise ValueError("Demo requires Docker and a nonempty approved source allowlist.")
+            if not info["runtime_image_id"] or info["runtime_image_id"] == info["compiler_image_id"]:
+                raise ValueError("Demo requires separate verified compiler and runtime images.")
         self.dispatcher = Dispatcher(store, data_dir, workers)
         self.compile_slots = threading.BoundedSemaphore(1)
         self.stop_event = threading.Event()
@@ -72,7 +195,10 @@ class App:
         self.intakes: dict[tuple[str, int], int] = {}
         self.watcher: threading.Thread | None = None
         self.rate_limiter = RateLimiter()
-        self.check_times: dict[int, float] = {}
+        self.auth_limiter = RateLimiter()
+        self.login_limiter = RateLimiter()
+        self.account_limiter = RateLimiter()
+        self.compile_check_limiter = RateLimiter()
         self.open_registration = True
         self.routes: list[tuple[str, re.Pattern[str], Callable[..., Any], str]] = []
         self._register_routes()
@@ -122,15 +248,18 @@ class App:
         finally:
             self.compile_slots.release()
 
-    def template_source(self) -> str:
+    def template_source(self, language: str = "cpp17") -> str:
+        profile = language_profile(language)
+        path = TEMPLATE_PATH if language == "cpp17" else TEMPLATE_PATH.with_name("bot_template" + Path(profile.filename).suffix)
         try:
-            return TEMPLATE_PATH.read_text(encoding="utf-8")
+            return path.read_text(encoding="utf-8")
         except OSError:
-            return "// OTT bot template missing\nint main() { return 0; }\n"
+            raise ApiError(503, "TEMPLATE_UNAVAILABLE", "Bot template is unavailable.") from None
 
-    def compile_final(self, bot_id: str, source: str) -> tuple[bool, str | None]:
+    def compile_final(self, bot_id: str, source: str, language: str = "cpp17") -> tuple[bool, str | None]:
         self.check_source(source)
-        ok, msg = compile_source(artifact_path(self.data_dir, bot_id), source)
+        target = artifact_path(self.data_dir, bot_id)
+        ok, msg = compile_source(target, source) if language == "cpp17" else compile_source(target, source, language)
         if not ok:
             shutil.rmtree(artifact_path(self.data_dir, bot_id).parent, ignore_errors=True)
         return ok, msg
@@ -138,27 +267,27 @@ class App:
     def check_dir(self, entry_id: str) -> Path:
         return artifact_path(self.data_dir, f"check-{entry_id}").parent
 
-    def cached_build(self, entry_id: str, source: str) -> Path | None:
+    def cached_build(self, entry_id: str, source: str, language: str = "cpp17") -> Path | None:
         sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        cached = artifact_path(self.data_dir, f"check-{entry_id}-{sha}")
+        cached = artifact_path(self.data_dir, f"check-{entry_id}-{build_key(sha, language)}")
         if not cached.exists():
             return None
-        runner.SANDBOX.verify_artifact(cached, expected_source_hash=sha)
+        runner.SANDBOX.verify_artifact(cached, expected_source_hash=sha, expected_language=language)
         return cached
 
-    def build_final(self, entry_id: str, bot_id: str, source: str) -> tuple[bool, str | None]:
+    def build_final(self, entry_id: str, bot_id: str, source: str, language: str = "cpp17") -> tuple[bool, str | None]:
         """Build an accepted receipt; quota is charged by the fenced caller."""
         self.check_source(source)
         sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
         dest = artifact_path(self.data_dir, bot_id)
         if dest.exists():
-            runner.SANDBOX.verify_artifact(dest, expected_source_hash=sha)
+            runner.SANDBOX.verify_artifact(dest, expected_source_hash=sha, expected_language=language)
             return True, None
-        cached = self.cached_build(entry_id, source)
+        cached = self.cached_build(entry_id, source, language)
         if cached is not None:
-            runner.SANDBOX.copy_artifact(cached, dest, expected_source_hash=sha)
+            runner.SANDBOX.copy_artifact(cached, dest, expected_source_hash=sha, expected_language=language)
             return True, None
-        return self.compile_final(bot_id, source)
+        return self.compile_final(bot_id, source) if language == "cpp17" else self.compile_final(bot_id, source, language)
 
     def _process_submission(self, receipt: dict[str, Any]) -> None:
         charged = False
@@ -175,15 +304,15 @@ class App:
                 if not entry:
                     raise InfraError("Accepted entry is missing.")
                 dest = artifact_path(self.data_dir, receipt["bot_id"])
-                if not receipt["free_compile"] and self.cached_build(receipt["entry_id"], receipt["source"]) is None and not dest.exists():
+                if not receipt["free_compile"] and self.cached_build(receipt["entry_id"], receipt["source"], receipt["language"]) is None and not dest.exists():
                     self.store.bump_compile(receipt["entry_id"], COMPILE_LIMIT, receipt_id=receipt["id"])
                     charged = True
-                ok, message = self.build_final(receipt["entry_id"], receipt["bot_id"], receipt["source"])
+                ok, message = self.build_final(receipt["entry_id"], receipt["bot_id"], receipt["source"], receipt["language"])
                 if not ok:
                     self.store.fail_submission(receipt["id"], message or "COMPILE_ERROR", compile_lease=compile_lease)
                     return
                 self.store.finalize_entry(receipt["entry_id"], receipt["tournament_id"], receipt["user_id"],
-                        receipt["bot_id"], receipt["source"], compile_lease=compile_lease)
+                        receipt["bot_id"], receipt["source"], compile_lease=compile_lease, language=receipt["language"])
             except (InfraError, LeaseLost, OSError, ApiError, sqlite3.Error, StoreError) as exc:
                 try:
                     if charged:
@@ -195,6 +324,13 @@ class App:
                     LOG.warning("build receipt %s lost its lease", receipt["id"])
 
     def _coding_watcher(self) -> None:
+        self.store.enable_thread_connection_reuse()
+        try:
+            self._coding_watcher_loop()
+        finally:
+            self.store.close_thread_connection()
+
+    def _coding_watcher_loop(self) -> None:
         """Process durable final submissions and reserve missed-deadline drafts."""
         while not self.stop_event.is_set():
             try:
@@ -213,7 +349,7 @@ class App:
                         try:
                             self.check_source(row["draft_source"])
                             self.store.reserve_submission(row["eid"], row["tid"], row["user_id"],
-                                                          row["draft_source"], time.time(), auto=True,
+                                                          row["draft_source"], time.time(), auto=True, language=row["draft_language"],
                                                           runtime_profile=runner.SANDBOX.policy_info())
                         except (ApiError, StoreError) as exc:
                             self.store.set_submit_note(row["eid"], exc.message)
@@ -239,12 +375,11 @@ class App:
         return out
 
     def entry_json(self, e: dict[str, Any]) -> dict[str, Any]:
-        pending = self.store.get_pending_submission(e["id"])
         return {
             "id": e["id"], "tournament_id": e["tournament_id"], "username": e["username"], "status": e["status"],
             "registered_at": e["registered_at"], "bot_version_id": e["bot_submission_id"], "compile_status": e["compile_status"],
             "submitted_at": e["submitted_at"], "submit_note": e["submit_note"],
-            "submission_status": pending["status"] if pending else None,
+            "submission_status": e.get("submission_status"),
         }
 
     def bot_json(self, b: dict[str, Any], selected: str | None = None) -> dict[str, Any]:
@@ -278,17 +413,50 @@ class App:
         clocks[live["side"]] = max(0, int(clocks[live["side"]] - (time.monotonic() - live["since"]) * 1000))
         return clocks, live["side"]
 
+    def cached_view(self, m: dict[str, Any], *, with_moves: bool) -> dict[str, Any] | None:
+        version = m.get("state_version")
+        if type(version) is not int:
+            return None
+        return self.match_view_cache.get(m["id"], m["game_id"], m["game_version"], version,
+                                         with_moves=with_moves)
+
     def detail(self, m: dict[str, Any], with_moves: bool = True) -> dict[str, Any]:
+        version = m.get("state_version")
+        view = self.cached_view(m, with_moves=with_moves)
+        if view is None:
+            if "state_json" not in m:
+                full_match = self.store.get_match_render(m["id"])
+                if full_match is None:
+                    raise ApiError(404, "NOT_FOUND", "Match not found.")
+                m = full_match
+                version = m.get("state_version")
+                view = self.cached_view(m, with_moves=with_moves)
+            state_json = m.get("state_json")
+        else:
+            state_json = None
+        if view is None:
+            state = json.loads(state_json) if state_json else None
+            public_view = get_adapter(m["game_id"], m["game_version"]).public_view(state)
+            if with_moves:
+                view = public_view
+                weight = len(state_json) if state_json else 0
+            else:
+                moves = public_view.get("moves", [])
+                view = {key: value for key, value in public_view.items() if key != "moves"}
+                view["last_move"] = {"from": moves[-1]["from"], "to": moves[-1]["to"]} if moves else None
+                weight = len(json.dumps(view, separators=(",", ":")).encode("utf-8"))
+            if state_json and type(version) is int and weight <= MATCH_VIEW_CACHE_MAX_STATE:
+                view = self.match_view_cache.put(m["id"], m["game_id"], m["game_version"], version, view, weight,
+                                                 with_moves=with_moves)
+        view = dict(view)
         out = self.summary(m)
-        state = json.loads(m["state_json"]) if m["state_json"] else None
         clocks, running = self.live_clocks(m)
         out["clocks_ms"] = clocks
         out["running_side"] = running
         out["clock_seconds"] = m["clock_seconds"]
-        tournament = self.get_tournament(m["tournament_id"])
-        view = get_adapter(tournament["game_id"], tournament["game_version"]).public_view(state)
+        out["state_version"] = m.get("state_version")
         if not with_moves:
-            view.pop("moves", None)
+            out["last_move"] = view.pop("last_move", None)
         out.update(view)
         return out
 
@@ -309,6 +477,16 @@ class App:
         if not t:
             raise ApiError(404, "NOT_FOUND", "Tournament not found.")
         return t
+
+    def require_tournament(self, tid: str) -> None:
+        if not self.store.tournament_exists(tid):
+            raise ApiError(404, "NOT_FOUND", "Tournament not found.")
+
+    def get_tournament_status(self, tid: str) -> str:
+        status = self.store.get_tournament_status(tid)
+        if status is None:
+            raise ApiError(404, "NOT_FOUND", "Tournament not found.")
+        return status
 
     # ---------- routes ----------
     def route(self, method: str, pattern: str, mutating: bool | None = None) -> Callable:
@@ -352,7 +530,7 @@ class App:
                 valid_password = False
             if not valid_password:
                 raise ApiError(400, "BAD_REQUEST", "Password must be valid UTF-8 and at most 128 bytes.")
-            if not app.rate_limiter.allow("login:" + username.lower(), burst=10, per_second=1/30):
+            if not app.login_limiter.allow("login:" + username.lower(), burst=10, per_second=1/30):
                 raise ApiError(429, "RATE_LIMITED", "Too many attempts. Try again later.")
             user = app.store.verify_login(username, password)
             if not user:
@@ -376,14 +554,7 @@ class App:
 
         @r("GET", "/stats")
         def stats(ctx: Ctx) -> Any:
-            ts = app.store.list_tournaments()
-            return 200, {
-                "users": app.store.user_count(),
-                "tournaments": len(ts),
-                "running_tournaments": sum(t["status"] == "RUNNING" for t in ts),
-                "running_matches": sum(t["matches_running"] for t in ts),
-                "stream_clients": HUB.clients,
-            }
+            return 200, app.store.site_stats() | {"stream_clients": HUB.clients}
 
         @r("GET", "/ops/status")
         def operation_status(ctx: Ctx) -> Any:
@@ -429,8 +600,7 @@ class App:
         @r("PATCH", "/tournaments/{tid}")
         def patch_tournament(ctx: Ctx, tid: str) -> Any:
             user = app.require_organizer(ctx)
-            t = app.get_tournament(tid)
-            if t["status"] != "DRAFT":
+            if app.get_tournament_status(tid) != "DRAFT":
                 raise ApiError(409, "CONFLICT", "Only DRAFT tournaments can be edited.")
             body = ctx.json()
             fields: dict[str, Any] = {}
@@ -503,43 +673,46 @@ class App:
             if t["matches_total"]:
                 return 200, {"matches": t["matches_total"]}
             entries = app.store.list_entries(tid)
-            rows = round_robin([e["id"] for e in entries])
+            rows = iter_round_robin_rows([e["id"] for e in entries])
+            match_count = len(entries) * (len(entries) - 1)
             try:
-                app.store.create_matches(tid, rows, t["clock_seconds"] * 1000)
+                app.store.create_matches_from_schedule(tid, rows, t["clock_seconds"] * 1000)
             except StoreError as exc:
                 raise ApiError(exc.status, exc.code, exc.message) from None
             app.store.audit(user["id"], "tournament.schedule", tid)
-            return 201, {"matches": len(rows)}
+            return 201, {"matches": match_count}
 
         @r("POST", "/tournaments/{tid}/resume")
         def resume(ctx: Ctx, tid: str) -> Any:
             app.require_organizer(ctx)
-            app.get_tournament(tid)
+            app.require_tournament(tid)
             return 200, {"resumed": app.store.resume_paused(tid)}
 
         @r("GET", "/tournaments/{tid}/schedule")
         def get_schedule(ctx: Ctx, tid: str) -> Any:
-            app.get_tournament(tid)
-            matches = app.store.list_matches(tid)
+            app.require_tournament(tid)
+            matches = app.store.list_match_summaries(tid)
             entries = app.store.list_entries(tid)
             return 200, {"matches": [app.summary(m) for m in matches], "byes": byes([e["id"] for e in entries], matches)}
 
         @r("GET", "/tournaments/{tid}/standings")
         def get_standings(ctx: Ctx, tid: str) -> Any:
-            t = app.get_tournament(tid)
-            rows = standings(app.store.list_entries(tid), app.store.list_matches(tid))
-            return 200, {"items": rows, "status": t["status"]}
+            status = app.get_tournament_status(tid)
+            rows = standings(app.store.list_entries(tid), app.store.list_finished_match_results(tid),
+                             matches_in_schedule_order=True, matches_are_finished=True)
+            return 200, {"items": rows, "status": status}
 
         @r("GET", "/tournaments/{tid}/entries")
         def list_entries(ctx: Ctx, tid: str) -> Any:
             app.require_organizer(ctx)
-            app.get_tournament(tid)
-            return 200, {"items": [app.entry_json(e) for e in app.store.list_entries(tid)]}
+            app.require_tournament(tid)
+            entries = app.store.list_entries(tid, include_submission_status=True)
+            return 200, {"items": [app.entry_json(e) for e in entries]}
 
         @r("GET", "/tournaments/{tid}/entry")
         def my_entry(ctx: Ctx, tid: str) -> Any:
             user = app.require_login(ctx)
-            e = app.store.get_user_entry(tid, user["id"])
+            e = app.store.get_user_entry(tid, user["id"], include_submission_status=True)
             if not e or e["status"] == "REMOVED":
                 raise ApiError(404, "NOT_FOUND", "No entry.")
             return 200, app.entry_json(e)
@@ -549,8 +722,7 @@ class App:
             user = app.require_login(ctx)
             if user["role"] != "CONTESTANT":
                 raise ApiError(403, "FORBIDDEN", "Only contestants can register.")
-            t = app.get_tournament(tid)
-            if t["status"] != "REGISTRATION_OPEN":
+            if app.get_tournament_status(tid) != "REGISTRATION_OPEN":
                 raise ApiError(409, "CONFLICT", "Registration is not open.")
             existing = app.store.get_user_entry(tid, user["id"])
             if existing and existing["status"] != "REMOVED":
@@ -572,7 +744,7 @@ class App:
             if e["user_id"] != user["id"] and user["role"] != "ORGANIZER":
                 raise ApiError(403, "FORBIDDEN", "Not your entry.")
             allowed = ("DRAFT", "REGISTRATION_OPEN") if user["role"] != "ORGANIZER" else ("DRAFT", "REGISTRATION_OPEN", "CODING")
-            if app.get_tournament(e["tournament_id"])["status"] not in allowed:
+            if app.get_tournament_status(e["tournament_id"]) not in allowed:
                 raise ApiError(409, "CONFLICT", "Roster is locked.")
             app.store.remove_entry(eid)
             return 204, None
@@ -612,19 +784,28 @@ class App:
             app.check_source(src)
             return src
 
+        def read_language(ctx: Ctx, *, query: bool = False) -> str:
+            value = ctx.query.get("language", ["cpp17"])[0] if query else ctx.json().get("language", "cpp17")
+            try:
+                language_profile(value)
+            except ValueError as exc:
+                raise ApiError(400, "UNSUPPORTED_LANGUAGE", str(exc)) from None
+            return value
+
         @r("GET", "/bot-template")
         def bot_template(ctx: Ctx) -> Any:
-            return 200, ("text/plain; charset=utf-8", app.template_source())
+            return 200, ("text/plain; charset=utf-8", app.template_source(read_language(ctx, query=True)))
 
         @r("GET", "/tournaments/{tid}/code")
         def get_code(ctx: Ctx, tid: str) -> Any:
             t, e = my_coding_entry(ctx, tid)
-            draft, updated = app.store.get_draft(e["id"])
+            draft, updated, language = app.store.get_draft(e["id"], with_language=True)
             submitted = e["submitted_at"] is not None
             receipt = app.store.get_pending_submission(e["id"])
             editable = t["status"] == "CODING" and not submitted and not receipt and time.time() < (t["coding_deadline"] or 0)
             return 200, {
-                "tournament": app.tournament_json(t), "entry_id": e["id"], "source": draft if draft is not None else app.template_source(),
+                "tournament": app.tournament_json(t), "entry_id": e["id"], "source": draft if draft is not None else app.template_source(language),
+                "language": language, "languages": [{"id": key, "label": value.label, "filename": value.filename} for key, value in LANGUAGES.items()],
                 "is_template": draft is None, "updated_at": updated, "submitted": submitted, "submitted_at": e["submitted_at"],
                 "submit_note": e["submit_note"], "editable": editable, "server_time": int(time.time()),
                 "compile_used": e["compile_count"], "compile_limit": COMPILE_LIMIT,
@@ -636,9 +817,10 @@ class App:
         def save_code(ctx: Ctx, tid: str) -> Any:
             t, e = my_coding_entry(ctx, tid)
             can_edit(t, e, ctx.received_at)
+            language = read_language(ctx)
             src = read_source(ctx)
             try:
-                stamp = app.store.save_draft(e["id"], src)
+                stamp = app.store.save_draft(e["id"], src, language)
             except StoreError as exc:
                 raise ApiError(exc.status, exc.code, exc.message) from None
             return 200, {"updated_at": stamp, "server_time": int(time.time())}
@@ -647,28 +829,28 @@ class App:
         def check_code(ctx: Ctx, tid: str) -> Any:
             t, e = my_coding_entry(ctx, tid)
             can_edit(t, e, ctx.received_at)
+            language = read_language(ctx)
             src = read_source(ctx)
             uid = ctx.user["id"]  # type: ignore[index]
             if app.store.queued_submissions(limit=1):
                 raise ApiError(503, "FINAL_SUBMISSIONS_FIRST", "Final submissions are being processed; retry the check later.")
-            if time.time() - app.check_times.get(uid, 0.0) < 3:
+            if not app.compile_check_limiter.allow("compile-check:" + str(uid), burst=1, per_second=1 / 3):
                 raise ApiError(429, "RATE_LIMITED", "Wait a few seconds between compile checks.")
             probe = str(uuid.uuid4())
             try:
                 with app.build_slot() as compile_lease:
                     used = app.store.bump_compile(e["id"], COMPILE_LIMIT)
-                    app.check_times[uid] = time.time()
                     try:
-                        ok, msg = app.compile_final(probe, src)
+                        ok, msg = app.compile_final(probe, src) if language == "cpp17" else app.compile_final(probe, src, language)
                         if ok:
                             app.store.assert_compile_slot(*compile_lease)
                             sha = hashlib.sha256(src.encode("utf-8")).hexdigest()
-                            target = artifact_path(app.data_dir, f"check-{e['id']}-{sha}")
+                            target = artifact_path(app.data_dir, f"check-{e['id']}-{build_key(sha, language)}")
                             if target.exists():
-                                runner.SANDBOX.verify_artifact(target, expected_source_hash=sha)
+                                runner.SANDBOX.verify_artifact(target, expected_source_hash=sha, expected_language=language)
                             else:
-                                runner.SANDBOX.copy_artifact(artifact_path(app.data_dir, probe), target, expected_source_hash=sha)
-                            app.store.set_last_ok(e["id"], sha, compile_lease=compile_lease)
+                                runner.SANDBOX.copy_artifact(artifact_path(app.data_dir, probe), target, expected_source_hash=sha, expected_language=language)
+                            app.store.set_last_ok(e["id"], build_key(sha, language), compile_lease=compile_lease)
                     except (InfraError, LeaseLost, OSError):
                         app.store.refund_compile(e["id"])
                         raise
@@ -683,13 +865,14 @@ class App:
             t, e = my_coding_entry(ctx, tid)
             if ctx.json().get("confirm") is not True:
                 raise ApiError(400, "CONFIRM_REQUIRED", "Submission is final; send confirm=true.")
+            language = read_language(ctx)
             src = read_source(ctx)
             if not src.strip():
                 raise ApiError(400, "BAD_REQUEST", "Source is empty.")
             pending = app.store.get_pending_submission(e["id"])
             if not pending and e["submitted_at"] is None and not app.health_report()["ready"]:
                 raise ApiError(503, "NOT_READY", "Submission admission is paused; retry later.")
-            receipt = app.store.reserve_submission(e["id"], tid, ctx.user["id"], src, ctx.received_at,
+            receipt = app.store.reserve_submission(e["id"], tid, ctx.user["id"], src, ctx.received_at, language=language,
                                                   runtime_profile=runner.SANDBOX.policy_info())
             return (200 if receipt["status"] == "READY" else 202), {"accepted": True, "receipt_id": receipt["id"], "status": receipt["status"],
                          "received_at": receipt["received_at"], "submitted_at": receipt["received_at"] if receipt["status"] == "READY" else None,
@@ -707,12 +890,27 @@ class App:
 
         @r("GET", "/live")
         def live(ctx: Ctx) -> Any:
-            ms = app.store.list_matches(statuses=("RUNNING",), limit=24)
-            return 200, {"items": [app.detail(m, with_moves=False) | {"last_move": _last_move(m)} for m in ms]}
+            overviews = app.store.list_matches(statuses=("RUNNING",), limit=24, include_state=False)
+            misses = [m["id"] for m in overviews if app.cached_view(m, with_moves=False) is None]
+            renders = {m["id"]: m for m in app.store.get_match_renders(misses)}
+            items = [app.detail(renders.get(m["id"], m), with_moves=False) for m in overviews]
+            return 200, {"items": items}
 
         @r("GET", "/matches/{mid}")
         def match_detail(ctx: Ctx, mid: str) -> Any:
-            m = app.store.get_match(mid)
+            since = ctx.query.get("since")
+            if since and len(since) == 1:
+                poll = app.store.get_match_poll(mid)
+                if not poll:
+                    raise ApiError(404, "NOT_FOUND", "Match not found.")
+                state_version = poll.get("state_version")
+                if type(state_version) is int and since == [str(state_version)]:
+                    clocks, running = app.live_clocks(poll)
+                    return 200, {"not_modified": True, "state_version": state_version,
+                                 "status": poll["status"], "result": poll["result"],
+                                 "result_reason": poll["result_reason"], "clocks_ms": clocks,
+                                 "running_side": running}
+            m = app.store.get_match_overview(mid)
             if not m:
                 raise ApiError(404, "NOT_FOUND", "Match not found.")
             out = app.detail(m)
@@ -725,31 +923,24 @@ class App:
             if not u:
                 raise ApiError(404, "NOT_FOUND", "User not found.")
             games = []
-            totals = {"wins": 0, "draws": 0, "losses": 0, "points": 0}
-            for m in app.store.user_matches(u["id"]):
+            totals = app.store.user_match_totals(u["id"])
+            for m in app.store.user_matches(u["id"], include_state=False):
                 white = m["white_name"] == u["username"]
                 outcome = None
                 if m["status"] == "FINISHED":
                     outcome = "draw" if m["result"] == "DRAW" else "win" if (m["result"] == "WHITE_WIN") == white else "loss"
-                    key = {"win": ("wins", 3), "draw": ("draws", 1), "loss": ("losses", 0)}[outcome]
-                    totals[key[0]] += 1
-                    totals["points"] += key[1]
                 games.append({"id": m["id"], "tournament_name": m["tournament_name"], "opponent": m["black_name"] if white else m["white_name"],
                               "color": "white" if white else "black", "status": m["status"], "outcome": outcome, "reason": m["result_reason"]})
             entries = []
-            for e in app.store.user_entries(u["id"]):
-                t = app.store.get_tournament(e["tournament_id"])
-                rows = standings(app.store.list_entries(t["id"]), app.store.list_matches(t["id"]))
-                mine = next((r for r in rows if r["entry_id"] == e["id"]), None)
-                entries.append({"tournament_id": t["id"], "tournament_name": t["name"], "status": t["status"],
-                                "rank": mine["rank"] if mine else None, "points": mine["points"] if mine else 0, "compile_status": e["compile_status"]})
+            with closing(app.store.iter_user_standings_inputs(u["id"], finished_matches_only=True)) as inputs:
+                for tournament in inputs:
+                    rows = standings(tournament["entries"], tournament["matches"],
+                                     matches_in_schedule_order=True, matches_are_finished=True)
+                    mine = next((row for row in rows if row["entry_id"] == tournament["entry_id"]), None)
+                    entries.append({"tournament_id": tournament["tournament_id"], "tournament_name": tournament["tournament_name"],
+                                    "status": tournament["status"], "rank": mine["rank"] if mine else None,
+                                    "points": mine["points"] if mine else 0, "compile_status": tournament["compile_status"]})
             return 200, {"username": u["username"], "role": u["role"], "created_at": u["created_at"], "totals": totals, "games": games, "entries": entries}
-
-        def _last_move(m: dict[str, Any]) -> dict[str, str] | None:
-            if not m["state_json"]:
-                return None
-            log = json.loads(m["state_json"])["moves_log"]
-            return {"from": log[-1]["from"], "to": log[-1]["to"]} if log else None
 
 
 class Ctx:
@@ -758,6 +949,7 @@ class Ctx:
         self.set_session: str | None = None
         self.clear_session = False
         self._body: bytes | None = None
+        self._json: dict[str, Any] | None = None
         self.received_at = time.time()
         self.query = parse_qs(urlsplit(handler.path).query)
 
@@ -768,7 +960,7 @@ class Ctx:
     def raw(self) -> bytes:
         if self._body is None:
             lengths = self.handler.headers.get_all("Content-Length", [])
-            if self.handler.headers.get("Transfer-Encoding") or len(lengths) > 1:
+            if self.handler.headers.get_all("Transfer-Encoding", []) or len(lengths) > 1:
                 raise ApiError(400, "BAD_REQUEST", "Ambiguous request framing.")
             try:
                 value = lengths[0] if lengths else "0"
@@ -791,9 +983,29 @@ class Ctx:
         return self._body
 
     def json(self) -> dict[str, Any]:
+        if self._json is not None:
+            return self._json
         raw = self.raw()
         if not raw:
-            return {}
+            self._json = {}
+            return self._json
+        depth = 0
+        position = 0
+        # Match strings from their known start; possessive repeats bound malformed input work.
+        while match := _JSON_MARKERS.search(raw, position):
+            index = match.start()
+            marker = raw[index]
+            position = index + 1
+            if marker == 34:
+                position = _json_string_end(raw, index)
+            elif marker == 92:
+                raise ApiError(400, "BAD_REQUEST", "Body must be valid JSON.")
+            elif marker in (123, 91):
+                depth += 1
+                if depth > MAX_JSON_DEPTH:
+                    raise ApiError(400, "BAD_REQUEST", "Body JSON nesting exceeds 64 levels.")
+            elif marker in (125, 93):
+                depth -= 1
         try:
             def unique_object(pairs):
                 result = {}
@@ -806,46 +1018,197 @@ class Ctx:
             def invalid_constant(value):
                 raise ValueError("Non-finite JSON number.")
 
-            data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+            def finite_float(value):
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError("Non-finite JSON number.")
+                return number
+
+            data = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object,
+                              parse_constant=invalid_constant, parse_float=finite_float)
         except (ValueError, UnicodeDecodeError, RecursionError):
             raise ApiError(400, "BAD_REQUEST", "Body must be valid JSON.") from None
         if not isinstance(data, dict):
             raise ApiError(400, "BAD_REQUEST", "Body must be a JSON object.")
-        return data
+        self._json = data
+        return self._json
+
+
+class _DeadlineScheduler:
+    """Watch all request sockets with one bounded timer thread."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._active: dict[ConnectionDeadline, tuple[float, int]] = {}
+        self._heap: list[tuple[float, int, ConnectionDeadline]] = []
+        self._serial = 0
+        self._clients = 0
+        self._stopping = False
+        self._thread = threading.Thread(target=self._run, daemon=True, name="request-deadlines")
+        self._thread.start()
+
+    def arm(self, deadline: "ConnectionDeadline", timeout: float) -> None:
+        with self._condition:
+            if deadline._closed or deadline._fired:
+                return
+            due = time.monotonic() + timeout
+            self._serial += 1
+            deadline._deadline = due
+            deadline._callback_done.clear()
+            self._active[deadline] = (due, self._serial)
+            heapq.heappush(self._heap, (due, self._serial, deadline))
+            self._compact()
+            self._condition.notify()
+
+    def cancel(self, deadline: "ConnectionDeadline", *, close: bool = False) -> bool:
+        with self._condition:
+            was_active = self._active.pop(deadline, None) is not None
+            deadline._deadline = None
+            if was_active:
+                deadline._callback_done.set()
+            release = close and not deadline._closed
+            if close:
+                deadline._closed = True
+            self._compact()
+            self._condition.notify()
+            return release
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stopping = True
+            self._condition.notify_all()
+        self._thread.join(timeout=1)
+
+    def _compact(self) -> None:
+        if len(self._heap) > max(128, 2 * len(self._active)):
+            self._heap = [(due, serial, deadline)
+                          for deadline, (due, serial) in self._active.items()]
+            heapq.heapify(self._heap)
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while True:
+                    if self._stopping:
+                        return
+                    if not self._heap:
+                        self._condition.wait()
+                        continue
+                    due, serial, deadline = self._heap[0]
+                    active = self._active.get(deadline)
+                    if active is None or active[1] != serial:
+                        heapq.heappop(self._heap)
+                        continue
+                    remaining = due - time.monotonic()
+                    if remaining > 0:
+                        self._condition.wait(remaining)
+                        continue
+                    heapq.heappop(self._heap)
+                    del self._active[deadline]
+                    deadline._deadline = None
+                    deadline._fired = True
+                    connection = deadline._connection
+                    break
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            finally:
+                deadline._callback_done.set()
+
+
+_DEADLINE_SCHEDULER: _DeadlineScheduler | None = None
+_DEADLINE_SCHEDULER_LOCK = threading.Lock()
+
+
+def _deadline_scheduler() -> _DeadlineScheduler:
+    global _DEADLINE_SCHEDULER
+    with _DEADLINE_SCHEDULER_LOCK:
+        if _DEADLINE_SCHEDULER is None:
+            _DEADLINE_SCHEDULER = _DeadlineScheduler()
+        _DEADLINE_SCHEDULER._clients += 1
+        return _DEADLINE_SCHEDULER
+
+
+def _release_deadline_scheduler(scheduler: _DeadlineScheduler) -> None:
+    global _DEADLINE_SCHEDULER
+    with _DEADLINE_SCHEDULER_LOCK:
+        if scheduler is not _DEADLINE_SCHEDULER:
+            return
+        scheduler._clients -= 1
+        if scheduler._clients == 0:
+            _DEADLINE_SCHEDULER = None
+            scheduler.stop()
+
+
+class ConnectionDeadline:
+    """Enforce absolute request deadlines through the shared timer thread."""
+
+    def __init__(self, connection: socket.socket) -> None:
+        self._connection = connection
+        self._deadline: float | None = None
+        self._closed = False
+        self._fired = False
+        self._callback_done = threading.Event()
+        self._callback_done.set()
+        self._scheduler = _deadline_scheduler()
+        self._thread = self._scheduler._thread
+
+    def arm(self, timeout: float) -> None:
+        self._scheduler.arm(self, timeout)
+
+    def cancel(self) -> None:
+        self._scheduler.cancel(self)
+
+    def close(self) -> None:
+        release = self._scheduler.cancel(self, close=True)
+        self._callback_done.wait(timeout=1)
+        if release:
+            _release_deadline_scheduler(self._scheduler)
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "OTTArena/1.0"
+    protocol_version = "HTTP/1.1"
     app: App
     timeout = 15
+    request_deadline_seconds = 20
+
+    def setup(self) -> None:
+        super().setup()
+        self.app.store.enable_thread_connection_reuse()
+        self.request_deadline = ConnectionDeadline(self.connection)
 
     def handle_one_request(self) -> None:
         # Idle timeout alone does not stop a client sending one byte at a time.
-        self.read_deadline = threading.Timer(20, self._expire_request)
-        self.read_deadline.daemon = True
-        self.read_deadline.start()
+        self.request_deadline.arm(self.request_deadline_seconds)
         try:
             super().handle_one_request()
-        finally:
-            self.read_deadline.cancel()
-
-    def _expire_request(self) -> None:
-        try:
-            self.connection.shutdown(socket.SHUT_RDWR)
         except OSError:
-            pass
+            self.close_connection = True
+        finally:
+            self.request_deadline.cancel()
 
     def body_received(self) -> None:
-        self.read_deadline.cancel()
+        self.request_deadline.cancel()
+
+    def finish(self) -> None:
+        deadline = getattr(self, "request_deadline", None)
+        try:
+            if deadline is not None:
+                deadline.close()
+            super().finish()
+        finally:
+            self.app.store.close_thread_connection()
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter
         LOG.debug("%s %s", self.address_string(), fmt % args)
 
-    def _security_headers(self) -> None:
+    def _security_headers(self, *, cache_control: str = "no-store") -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Content-Security-Policy", CSP)
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Request-ID", getattr(self, "request_id", uuid.uuid4().hex))
 
     def do_GET(self) -> None:  # noqa: N802
@@ -878,6 +1241,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self._security_headers()
+        if self.close_connection:
+            self.send_header("Connection", "close")
         if status in (429, 503):
             self.send_header("Retry-After", "5")
         if ctx and ctx.set_session:
@@ -899,6 +1264,7 @@ class Handler(BaseHTTPRequestHandler):
         ctx = None
         intake_key = None
         try:
+            self.app.policy.validate_request(self.headers, method, self.path)
             proxied = self.app.policy.authenticate(self.headers, method)
             self.request_ip = self.app.policy.client_ip(self.headers, self.client_address[0], proxied)
             if len(self.path) > 8192:
@@ -923,12 +1289,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             sub = path[len("/api/v1"):]
             if sub in ("/auth/login", "/auth/register"):
-                if not self.app.rate_limiter.allow("auth:" + self.request_ip, burst=30, per_second=1):
+                if not self.app.auth_limiter.allow("auth:" + self.request_ip, burst=30, per_second=1):
                     raise ApiError(429, "RATE_LIMITED", "Too many authentication requests.")
             if method != "GET" and maintenance_enabled(self.app.data_dir) and sub not in (
                     "/ops/maintenance", "/auth/login", "/auth/logout"):
                 raise ApiError(503, "MAINTENANCE", "Maintenance is active; retry later.")
             user, token = self._session()
+            if user and not self.app.account_limiter.allow("account:" + str(user["id"]), burst=180, per_second=30):
+                raise ApiError(429, "RATE_LIMITED", "Too many requests for this account.")
             intake_match = re.fullmatch(r"/tournaments/([0-9a-f-]{36})/code(?:/submit)?", sub)
             final_or_draft = (method == "POST" and sub.endswith("/code/submit")) or (method == "PUT" and sub.endswith("/code"))
             if final_or_draft and user and intake_match:
@@ -961,14 +1329,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             raise ApiError(405 if matched else 404, "METHOD_NOT_ALLOWED" if matched else "NOT_FOUND", "No such endpoint.")
         except (ApiError, RequestRejected) as exc:
+            self.close_connection = True
             self._send(exc.status, {"error": {"code": exc.code, "message": exc.message}}, ctx)
         except StoreError as exc:
+            self.close_connection = True
             self._send(exc.status, {"error": {"code": exc.code, "message": exc.message}}, ctx)
         except sqlite3.Error:
+            self.close_connection = True
             self._send(503, {"error": {"code": "DATABASE_UNAVAILABLE", "message": "Storage is unavailable; retry later."}}, ctx)
         except (socket.timeout, TimeoutError):
+            self.close_connection = True
             self._send(408, {"error": {"code": "REQUEST_TIMEOUT", "message": "Request timed out."}}, ctx)
         except Exception:  # noqa: BLE001
+            self.close_connection = True
             LOG.exception("unhandled error for %s %s", method, path)
             self._send(500, {"error": {"code": "INTERNAL", "message": "Internal server error."}}, ctx)
         finally:
@@ -987,6 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(503, {"error": {"code": "BUSY", "message": "Too many live connections."}})
             return
         try:
+            self.close_connection = True
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache, no-transform")
@@ -1021,14 +1395,22 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send(404, {"error": {"code": "NOT_FOUND", "message": "Not found."}})
                 return
-        data = target.read_bytes()
+        data, etag = self.app.static_cache.read(target)
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "image/svg+xml"):
             ctype += "; charset=utf-8"
+        conditions = self.headers.get("If-None-Match", "")
+        if conditions.strip() == "*" or any(tag.strip().removeprefix("W/") == etag for tag in conditions.split(",")):
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self._security_headers(cache_control="no-cache")
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self._security_headers()
+        self.send_header("ETag", etag)
+        self._security_headers(cache_control="no-cache")
         self.end_headers()
         self.wfile.write(data)
 

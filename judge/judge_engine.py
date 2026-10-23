@@ -1,14 +1,19 @@
-"""Run C++ submissions in short-lived, resource-limited Docker containers."""
+"""Compile and run submissions in short-lived, resource-limited Docker containers."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
+import shlex
+import stat
 import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.languages import language_profile, valid_jar
 from judge.problems import Problem
 from judge.scoring import output_tokens, summarize_cases
 
@@ -38,29 +43,47 @@ class ContainerResult:
 
 
 class DockerJudge:
-    def __init__(self, image: str = "lan-judge-cpp17") -> None:
+    def __init__(self, image: str = "lan-judge-cpp17", runtime_image: str | None = None) -> None:
         self.image = image
+        self.runtime_image = runtime_image or image
+        self.compiler_image_id: str | None = None
+        self.runtime_image_id: str | None = None
 
-    async def check_available(self) -> None:
+    async def _image_id(self, reference: str) -> str:
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
-                "docker",
-                "image",
-                "inspect",
-                self.image,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                "docker", "image", "inspect", "--format", "{{json .}}", reference,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
         except (OSError, TimeoutError) as exc:
-            raise JudgeInfrastructureError("Docker daemon or CLI is not available.") from exc
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise JudgeInfrastructureError("Docker image inspection unavailable.") from exc
         if process.returncode != 0:
-            detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
-            raise JudgeInfrastructureError(f"Required image {self.image!r} is unavailable: {detail[:500]}")
+            raise JudgeInfrastructureError(f"Required local image {reference!r} is unavailable; automatic pulls are disabled.")
+        try:
+            info = json.loads(stdout)
+            identity = info["Id"]
+            if info.get("Os") != "linux" or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise JudgeInfrastructureError("Invalid Linux image identity.") from None
+        return identity
 
-    async def judge(self, problem: Problem, source: str) -> dict[str, object]:
+    async def check_available(self) -> None:
+        self.compiler_image_id = await self._image_id(self.image)
+        self.runtime_image_id = (self.compiler_image_id if self.runtime_image == self.image
+                                 else await self._image_id(self.runtime_image))
+
+    async def judge(self, problem: Problem, source: str, language: str = "cpp17") -> dict[str, object]:
+        profile = language_profile(language)
         if os.name != "posix":
             raise JudgeInfrastructureError("Docker judging requires a Linux server.")
+        if self.compiler_image_id is None or self.runtime_image_id is None:
+            await self.check_available()
         runner_uid, runner_gid = _container_identity()
         with tempfile.TemporaryDirectory(prefix="lan-judge-") as temporary:
             root = Path(temporary)
@@ -68,7 +91,7 @@ class DockerJudge:
             build_dir = root / "build"
             source_dir.mkdir(mode=0o700)
             build_dir.mkdir(mode=0o700)
-            source_path = source_dir / "main.cpp"
+            source_path = source_dir / profile.filename
             source_path.write_text(source, encoding="utf-8")
             source_path.chmod(0o400)
             _set_owner(root, runner_uid, runner_gid)
@@ -76,11 +99,13 @@ class DockerJudge:
             _set_owner(source_path, runner_uid, runner_gid)
             _set_owner(build_dir, runner_uid, runner_gid)
 
+            compile_timeout = max(problem.compile_timeout_sec, profile.compile_timeout_seconds)
             compile_result = await self._compile(
                 source_dir=source_dir,
                 build_dir=build_dir,
                 work_dir=root,
-                timeout=problem.compile_timeout_sec,
+                timeout=compile_timeout,
+                language=language,
                 uid=runner_uid,
                 gid=runner_gid,
             )
@@ -89,7 +114,7 @@ class DockerJudge:
                     "verdict": "CE",
                     "score": 0,
                     "test_results": [],
-                    "message": "Compilation exceeded compile_timeout_sec.",
+                    "message": f"Compilation exceeded {compile_timeout} seconds.",
                 }
             if compile_result.output_limited:
                 return {
@@ -109,8 +134,17 @@ class DockerJudge:
                 }
 
             binary = build_dir / "main"
-            if not binary.is_file() or binary.stat().st_size > MAX_BINARY_BYTES:
+            info = binary.lstat() if binary.exists() or binary.is_symlink() else None
+            if (info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or not 0 < info.st_size <= MAX_BINARY_BYTES):
                 raise JudgeInfrastructureError("Compiler did not produce a valid binary under the size limit.")
+            if profile.artifact_format == "jar":
+                if not profile.main_class or not valid_jar(binary, profile.main_class):
+                    raise JudgeInfrastructureError("Compiler output is not a valid JAR with the expected main class.")
+            else:
+                with binary.open("rb") as stream:
+                    if stream.read(4) != b"\x7fELF":
+                        raise JudgeInfrastructureError("Compiler output is not an ELF executable.")
             binary.chmod(0o500)
             case_results: list[dict[str, object]] = []
             for index, case in enumerate(problem.tests, start=1):
@@ -120,6 +154,7 @@ class DockerJudge:
                     input_bytes=case.input.encode("utf-8"),
                     timeout=problem.time_limit_ms / 1000,
                     memory_mb=problem.memory_limit_mb,
+                    language=language,
                     uid=runner_uid,
                     gid=runner_gid,
                 )
@@ -165,6 +200,7 @@ class DockerJudge:
         build_dir: Path,
         work_dir: Path,
         timeout: int,
+        language: str = "cpp17",
         uid: int,
         gid: int,
     ) -> ContainerResult:
@@ -173,7 +209,7 @@ class DockerJudge:
             memory_mb=RUNNER_MEMORY_MB,
             uid=uid,
             gid=gid,
-            tmp_size_mb=64,
+            tmp_size_mb=max(64, language_profile(language).compile_tmp_mb),
         )
         args.extend(
             [
@@ -183,16 +219,20 @@ class DockerJudge:
                 f"type=bind,src={build_dir},dst=/build",
                 "--env",
                 "HOME=/tmp",
-                self.image,
-                "g++",
-                "-std=c++17",
-                "-O2",
-                "-pipe",
-                "-o",
-                "/build/main",
-                "/submission/main.cpp",
             ]
         )
+        profile = language_profile(language)
+        for key, value in profile.environment:
+            args.extend(["--env", f"{key}={value}"])
+        if profile.artifact_format == "jar":
+            command = shlex.join(profile.command("/submission/" + profile.filename, "/build/classes"))
+            package = shlex.join(profile.package_command("/build/classes", "/build/main"))
+            args.extend([self.compiler_image_id or self.image, "sh", "-c",
+                         f"mkdir -p /build/classes && {command} && "
+                         "test -f /build/classes/Main.class && " + package])
+        else:
+            args.extend([self.compiler_image_id or self.image,
+                         *profile.command("/submission/" + profile.filename, "/build/main")])
         result = await _run_docker(args, timeout=float(timeout), input_bytes=None, output_limit=MAX_COMPILE_LOG_BYTES)
         if result.returncode != 0 and _is_docker_error(result.stderr):
             raise JudgeInfrastructureError(_short_message(result.stderr))
@@ -206,6 +246,7 @@ class DockerJudge:
         input_bytes: bytes,
         timeout: float,
         memory_mb: int,
+        language: str,
         uid: int,
         gid: int,
     ) -> ContainerResult:
@@ -215,16 +256,11 @@ class DockerJudge:
             uid=uid,
             gid=gid,
             tmp_size_mb=16,
+            tmp_exec=False,
         )
-        args.extend(
-            [
-                "--mount",
-                f"type=bind,src={binary},dst=/judge/main,readonly",
-                "--interactive",
-                self.image,
-                "/judge/main",
-            ]
-        )
+        profile = language_profile(language)
+        args.extend(["--mount", f"type=bind,src={binary},dst=/judge/main,readonly", "--interactive",
+                     self.runtime_image_id or self.runtime_image, *profile.run_command("/judge/main")])
         return await _run_docker(args, timeout=timeout, input_bytes=input_bytes, output_limit=MAX_OUTPUT_BYTES)
 
     def _container_base(
@@ -235,11 +271,13 @@ class DockerJudge:
         uid: int,
         gid: int,
         tmp_size_mb: int,
+        tmp_exec: bool = True,
     ) -> list[str]:
         return [
             "docker",
             "run",
             "--rm",
+            "--pull=never",
             f"--cidfile={cid_file}",
             "--network=none",
             f"--memory={memory_mb}m",
@@ -250,7 +288,8 @@ class DockerJudge:
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             f"--user={uid}:{gid}",
-            f"--tmpfs=/tmp:rw,exec,nosuid,nodev,size={tmp_size_mb}m",
+            f"--tmpfs=/tmp:rw,{'exec' if tmp_exec else 'noexec'},nosuid,nodev,size={tmp_size_mb}m",
+            "--ulimit=core=0",
             "--ulimit=nofile=64:64",
             "--ulimit=fsize=67108864:67108864",
         ]

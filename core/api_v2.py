@@ -36,6 +36,8 @@ class CoreAPIv2Controller:
         self._definitions: dict[str, CompetitionDefinition] = {}
         self._seasons: dict[str, dict[str, Any]] = {}  # season_id -> {status, snapshot, revision, ...}
         self._entries: dict[str, list[Entry]] = {}     # season_id -> list[Entry]
+        self._entries_by_id: dict[str, dict[str, Entry]] = {}
+        self._team_names: dict[str, set[str]] = {}
         self._submissions: dict[str, list[Submission]] = {}  # season_id -> list[Submission]
         self._results: dict[str, list[EvaluationResult]] = {}  # season_id -> list[EvaluationResult]
         self._standings: dict[str, Standings] = {}
@@ -62,6 +64,8 @@ class CoreAPIv2Controller:
         }
         self._seasons[season_id] = season_data
         self._entries[season_id] = []
+        self._entries_by_id[season_id] = {}
+        self._team_names[season_id] = set()
         self._submissions[season_id] = []
         self._results[season_id] = []
         return season_data
@@ -98,7 +102,7 @@ class CoreAPIv2Controller:
             raise ValueError(f"Team registration quota reached ({snapshot.limits_and_quotas.max_teams} teams).")
 
         # Check duplicate team name or owner
-        if any(e.team_name == team_name for e in entries):
+        if team_name in self._team_names[season_id]:
             raise ValueError(f"Team name '{team_name}' is already registered.")
 
         entry = Entry(
@@ -109,6 +113,8 @@ class CoreAPIv2Controller:
             registered_at=int(time.time())
         )
         entries.append(entry)
+        self._entries_by_id[season_id][entry.entry_id] = entry
+        self._team_names[season_id].add(team_name)
         return entry
 
     def submit_code(
@@ -135,7 +141,7 @@ class CoreAPIv2Controller:
         if len(source_bytes) > quotas.max_source_size_bytes:
             raise ValueError(f"Source size ({len(source_bytes)} B) exceeds platform limit ({quotas.max_source_size_bytes} B).")
 
-        entry = next((e for e in self._entries[season_id] if e.entry_id == entry_id), None)
+        entry = self._entries_by_id[season_id].get(entry_id)
         if not entry:
             raise KeyError(f"Entry '{entry_id}' not found.")
 

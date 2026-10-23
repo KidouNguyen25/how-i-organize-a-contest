@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from judge.database import Database
+from core.languages import LANGUAGES
 from judge.judge_engine import DockerJudge, JudgeInfrastructureError
 from judge.problems import ProblemSet
 from judge.protocol import (
@@ -39,6 +40,7 @@ class JudgeService:
         self._worker_tasks: list[asyncio.Task[None]] = []
 
     def start_workers(self, count: int = 2) -> None:
+        self.database.enable_thread_connection_reuse()
         self._worker_tasks = [
             asyncio.create_task(self._worker_loop(), name=f"judge-worker-{index + 1}")
             for index in range(count)
@@ -47,9 +49,12 @@ class JudgeService:
     async def stop_workers(self) -> None:
         for task in self._worker_tasks:
             task.cancel()
-        if self._worker_tasks:
-            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
-        self._worker_tasks.clear()
+        try:
+            if self._worker_tasks:
+                await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+            self._worker_tasks.clear()
+        finally:
+            self.database.close_thread_connection()
 
     async def _worker_loop(self) -> None:
         while True:
@@ -61,7 +66,9 @@ class JudgeService:
                 problem = self.problems.get(submission["problem_id"])
                 if problem is None:
                     raise JudgeInfrastructureError("Problem package disappeared after submission.")
-                result = await self.engine.judge(problem, submission["source"])
+                result = (await self.engine.judge(problem, submission["source"])
+                          if submission["language"] == "cpp17" else
+                          await self.engine.judge(problem, submission["source"], submission["language"]))
                 self.database.finish_submission(
                     submission["id"],
                     verdict=str(result["verdict"]),
@@ -189,8 +196,8 @@ class JudgeService:
             source = data.get("source")
             if not isinstance(problem_id, str) or not isinstance(source, str):
                 raise RequestError("INVALID_REQUEST", "problem_id and source must be strings.")
-            if language != "cpp17":
-                raise RequestError("UNSUPPORTED_LANGUAGE", "Only cpp17 is supported.")
+            if not isinstance(language, str) or language not in LANGUAGES:
+                raise RequestError("UNSUPPORTED_LANGUAGE", "Choose " + ", ".join(LANGUAGES) + ".")
             try:
                 source_size = len(source.encode("utf-8"))
             except UnicodeEncodeError as exc:
@@ -201,7 +208,7 @@ class JudgeService:
                 raise RequestError("INVALID_SOURCE", "Source file must not contain NUL characters.")
             if self.problems.get(problem_id) is None:
                 raise RequestError("NOT_FOUND", "Problem does not exist.")
-            submission_id = self.database.create_submission(user_id, problem_id, source)
+            submission_id = self.database.create_submission(user_id, problem_id, source, language)
             return success(request_id, {"submission_id": submission_id, "status": "QUEUED"})
 
         if operation == "GET_SUBMISSION":
@@ -263,6 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tls-cert", default="data/server.crt")
     parser.add_argument("--tls-key", default="data/server.key")
     parser.add_argument("--docker-image", default="lan-judge-cpp17")
+    parser.add_argument("--docker-runtime-image", default="lan-judge-runtime")
     return parser
 
 
@@ -277,8 +285,10 @@ async def serve(args: argparse.Namespace) -> None:
         ssl_context = make_tls_context(cert, key)
         database = Database(args.database)
         problems = ProblemSet(args.problems)
-        engine = DockerJudge(args.docker_image)
+        engine = DockerJudge(args.docker_image, args.docker_runtime_image)
         await engine.check_available()
+        if engine.compiler_image_id == engine.runtime_image_id:
+            raise JudgeInfrastructureError("Server requires separate compiler and runtime images.")
     except (OSError, ValueError, ssl.SSLError, JudgeInfrastructureError) as exc:
         raise SystemExit(str(exc)) from exc
 

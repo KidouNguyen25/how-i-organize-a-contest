@@ -2,7 +2,7 @@
 
 ## Trạng thái tài liệu
 
-- **Hiện có trong code:** judge C++17 theo bộ test tĩnh, server TCP/TLS, CLI, SQLite và Docker runner.
+- **Hiện có trong code:** judge C++17, C17, Rust 2021, Go và Java 17 theo bộ test tĩnh; server TCP/TLS, CLI, SQLite và Docker runner.
 - **Sản phẩm đích:** nền tảng thi đấu bot OTT v1, có giao diện web, game engine, lịch giải và bot runner tương tác.
 - **Mockup có trong repo:** frontend tĩnh dùng dữ liệu mẫu, không gọi API và không lưu dữ liệu.
 - **Trạng thái OTT:** gateway, API, game engine, tournament service và bot runner OTT vẫn là thiết kế; chưa có trong code.
@@ -15,7 +15,7 @@ Thí sinh viết bot để tự chơi game do ban tổ chức phát hành. Game 
 
 Mục tiêu:
 
-1. Thí sinh đăng ký giải, gửi bot C++17 và xem lịch, điểm, kết quả.
+1. Thí sinh đăng ký giải, gửi bot C++17, C17, Rust 2021, Go hoặc Java 17 và xem lịch, điểm, kết quả.
 2. Ban tổ chức tạo giải OTT, chọn đồng hồ, khóa danh sách bot và khởi chạy lịch thi.
 3. Engine áp dụng cùng một bộ luật cho mọi bot, kiểm tra nước đi và ghi trạng thái trận.
 4. Hệ thống cân bằng màu bằng hai lượt đấu, lưu trạng thái để khôi phục trận sau khi server khởi động lại.
@@ -38,7 +38,7 @@ Người vận hành cấp quyền organizer ngoài luồng đăng ký công kha
 
 1. Đăng ký hoặc đăng nhập.
 2. Xem giải OTT đang mở và đăng ký một suất.
-3. Gửi source C++17. Server biên dịch để kiểm tra; bot lỗi biên dịch chưa đủ điều kiện dự giải.
+3. Gửi source bằng ngôn ngữ được hỗ trợ. Server biên dịch để kiểm tra; bot lỗi biên dịch chưa đủ điều kiện dự giải.
 4. Thay bot nếu cần trước khi giải chuyển sang `LOCKED`.
 5. Xem lịch đấu, màu quân, trạng thái trận, bảng điểm và kết quả.
 
@@ -52,7 +52,7 @@ Người vận hành cấp quyền organizer ngoài luồng đăng ký công kha
 
 ### Bot runner
 
-- Biên dịch mỗi phiên bản bot bằng C++17 trước khi tính giờ trận.
+- Biên dịch mỗi phiên bản bot bằng ngôn ngữ đã chọn trước khi tính giờ trận.
 - Chạy một process bot cho mỗi bên trong suốt trận. Engine gửi một observation JSON line và nhận một action JSON line mỗi lượt.
 - Chỉ engine thay đổi bàn cờ. Engine xác thực action theo danh sách nước hợp lệ.
 - Ghi log sau mỗi action được chấp nhận, gồm trạng thái và đồng hồ. Khi khởi động lại, chạy bot process mới từ snapshot và history được phép thấy.

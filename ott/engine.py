@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import copy
 import json
 from typing import Any
 
 FILES = "abcdefghi"
+_SQUARES = tuple(tuple(f"{FILES[file]}{rank + 1}" for file in range(9)) for rank in range(9))
+_SQUARE_COORDINATES = {square: (file, rank) for rank, row in enumerate(_SQUARES) for file, square in enumerate(row)}
 PIECES = ("scissors", "hammer", "paper", "king")
 BEATS = {"scissors": "paper", "paper": "hammer", "hammer": "scissors"}
 START_COUNTS = {"scissors": 3, "hammer": 3, "paper": 3, "king": 1}
@@ -15,6 +16,10 @@ REPETITION_LIMIT = 3
 ORTHO = ((1, 0), (-1, 0), (0, 1), (0, -1))
 DIAG = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 EIGHT = ORTHO + DIAG
+_POSITION_ALPHABET = ".0123456789abcdefghijklmn"
+_POSITION_FILE_INDEX = {file: index for index, file in enumerate(FILES)}
+_POSITION_PIECE_INDEX = {piece: index for index, piece in enumerate(PIECES)}
+_POSITION_PROMOTION_INDEX = {None: 0, "rook": 1, "bishop": 2}
 
 Action = dict[str, Any]
 
@@ -24,7 +29,14 @@ def sq(f: int, r: int) -> str:
 
 
 def parse_sq(s: str) -> tuple[int, int]:
+    coordinates = _SQUARE_COORDINATES.get(s)
+    if coordinates is not None:
+        return coordinates
     return FILES.index(s[0]), int(s[1]) - 1
+
+
+def _is_square(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 2 and value[0] in FILES and value[1] in "123456789"
 
 
 def in_board(f: int, r: int) -> bool:
@@ -74,7 +86,7 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
         """Add destination; return True when the square was empty (slide may continue)."""
         if not in_board(nf, nr):
             return False
-        dest = sq(nf, nr)
+        dest = _SQUARES[nr][nf]
         target = board.get(dest)
         if target is None:
             _add(out, origin, dest, pc, nr)
@@ -86,8 +98,10 @@ def _piece_moves(board: dict[str, Any], origin: str, pc: dict[str, Any]) -> list
     if pc["piece"] == "king":
         for dx, dy in EIGHT:
             nf, nr = f + dx, r + dy
-            if in_board(nf, nr) and sq(nf, nr) not in board:
-                _add(out, origin, sq(nf, nr), pc, nr)
+            if in_board(nf, nr):
+                dest = _SQUARES[nr][nf]
+                if dest not in board:
+                    _add(out, origin, dest, pc, nr)
     elif not pc["promotion"]:
         emit(f, r + fwd, True)
         emit(f - 1, r + fwd, True)
@@ -119,7 +133,7 @@ def legal_actions(state: dict[str, Any], side: str | None = None) -> list[Action
     side = side or state["side"]
     board = state["board"]
     if state["phase"] == "placement":
-        cells = [sq(f, r) for r in home_rows(side) for f in range(9) if sq(f, r) not in board]
+        cells = [_SQUARES[r][f] for r in home_rows(side) for f in range(9) if _SQUARES[r][f] not in board]
         remaining = state["remaining"][side]
         return [
             {"type": "place", "piece": piece, "to": cell}
@@ -134,13 +148,16 @@ def legal_actions(state: dict[str, Any], side: str | None = None) -> list[Action
     return out
 
 
-def _canon(action: Action) -> tuple:
-    return tuple(sorted(action.items()))
-
-
 def position_key(state: dict[str, Any]) -> str:
-    pieces = sorted((k, v["side"], v["piece"], v["promotion"] or "") for k, v in state["board"].items())
-    return state["side"] + "|" + json.dumps(pieces, separators=(",", ":"))
+    """Encode exact board occupancy in 81 cells plus side-to-move."""
+    cells = ["."] * 81
+    for square, piece in state["board"].items():
+        color_offset = 0 if piece["side"] == "white" else 12
+        code = (1 + color_offset + 3 * _POSITION_PIECE_INDEX[piece["piece"]]
+                + _POSITION_PROMOTION_INDEX[piece["promotion"]])
+        index = (ord(square[1]) - ord("1")) * 9 + _POSITION_FILE_INDEX[square[0]]
+        cells[index] = _POSITION_ALPHABET[code]
+    return ("w" if state["side"] == "white" else "b") + "".join(cells)
 
 
 def apply_action(state: dict[str, Any], action: Action) -> dict[str, str] | None:
@@ -189,14 +206,32 @@ def apply_action(state: dict[str, Any], action: Action) -> dict[str, str] | None
         return {"result": "DRAW", "reason": "REPETITION"}
     if state["move_count"] >= MAX_MOVES:
         return {"result": "DRAW", "reason": "MOVE_LIMIT"}
-    if not legal_actions(state):
+    if not any(
+        _piece_moves(board, origin, pc)
+        for origin, pc in board.items() if pc["side"] == state["side"]
+    ):
         return {**win, "reason": "NO_LEGAL_MOVES"}
     return None
 
 
 def validate_action(state: dict[str, Any], action: Action) -> bool:
-    legal = {_canon(a) for a in legal_actions(state)}
-    return _canon(action) in legal
+    if not isinstance(action, dict):
+        return False
+    side, board = state["side"], state["board"]
+    if state["phase"] == "placement":
+        if set(action) != {"type", "piece", "to"} or action["type"] != "place":
+            return False
+        piece, dest = action["piece"], action["to"]
+        return (
+            isinstance(piece, str) and piece in PIECES and _is_square(dest)
+            and parse_sq(dest)[1] in home_rows(side) and dest not in board
+            and state["remaining"][side][piece] > 0
+        )
+    origin = action.get("from")
+    if action.get("type") != "move" or not isinstance(origin, str):
+        return False
+    piece = board.get(origin)
+    return bool(piece and piece["side"] == side and action in _piece_moves(board, origin, piece))
 
 
 def observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict[str, int]) -> dict[str, Any]:
@@ -210,16 +245,17 @@ def observation(state: dict[str, Any], side: str, match_id: str, clocks_ms: dict
         history = state["history"]
         remaining = {p: 0 for p in PIECES}
         phase = "play"
+    # Protocol v1 piece and action fields are scalars; copy both mutable dictionary levels.
     return {
         "protocol_version": 1,
         "match_id": match_id,
         "phase": phase,
         "side": side,
-        "board": copy.deepcopy(board),
+        "board": {square: dict(piece) for square, piece in board.items()},
         "remaining_pieces": remaining,
         "clocks_ms": {"white": int(clocks_ms["white"]), "black": int(clocks_ms["black"])},
         "legal_actions": legal_actions(state, side),
-        "history": copy.deepcopy(history),
+        "history": [entry | {"action": dict(entry["action"])} for entry in history],
     }
 
 
@@ -236,13 +272,12 @@ def parse_action(line: str) -> Action:
     if not isinstance(data, dict):
         raise ValueError("action must be an object")
     kind = data.get("type")
-    coord = lambda v: isinstance(v, str) and len(v) == 2 and v[0] in FILES and v[1] in "123456789"  # noqa: E731
     if kind == "place":
-        if set(data) != {"type", "piece", "to"} or data["piece"] not in PIECES or not coord(data["to"]):
+        if set(data) != {"type", "piece", "to"} or data["piece"] not in PIECES or not _is_square(data["to"]):
             raise ValueError("bad place action")
     elif kind == "move":
         extra = set(data) - {"type", "from", "to", "promotion"}
-        if extra or not {"type", "from", "to"} <= set(data) or not coord(data["from"]) or not coord(data["to"]):
+        if extra or not {"type", "from", "to"} <= set(data) or not _is_square(data["from"]) or not _is_square(data["to"]):
             raise ValueError("bad move action")
         if "promotion" in data and data["promotion"] not in ("rook", "bishop"):
             raise ValueError("bad promotion")
@@ -253,7 +288,7 @@ def parse_action(line: str) -> Action:
 
 def public_board(state: dict[str, Any]) -> dict[str, Any] | None:
     """Board visible to spectators; None while placements are secret."""
-    return copy.deepcopy(state["board"]) if state["phase"] == "play" else None
+    return {square: dict(piece) for square, piece in state["board"].items()} if state["phase"] == "play" else None
 
 
 def placed_counts(state: dict[str, Any]) -> dict[str, int]:

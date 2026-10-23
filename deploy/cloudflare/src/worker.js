@@ -4,6 +4,7 @@
 export const MAX_BODY = 1024 * 1024;      // 1 MiB, khớp thiết kế mục 7.2/15.3
 const ORIGIN_TIMEOUT_MS = 25_000;
 const SEG = '[A-Za-z0-9_-]+';
+const TEXT_RESPONSE = new RegExp(`^/(bot-template|bots/${SEG}/source)$`);
 
 // Allowlist method + path (phần sau /api/v1). Khớp bảng route của ott/api.py.
 const ROUTES = [
@@ -22,7 +23,7 @@ const PATH_EXISTS = (sub) => ROUTES.some(([, re]) => re.test(sub));
 const METHOD_OK = (m, sub) => ROUTES.some(([rm, re]) => rm === m && re.test(sub));
 
 // Header client được phép chuyển tiếp. Mọi header khác (x-forwarded-*, x-contest-origin-key, cf-*, host...) bị bỏ.
-const FORWARD_HEADERS = ['accept', 'accept-language', 'content-type', 'cookie', 'origin', 'x-csrf-token', 'user-agent'];
+const FORWARD_HEADERS = ['accept', 'accept-language', 'content-type', 'cookie', 'origin', 'x-csrf-token', 'user-agent', 'sec-fetch-site'];
 
 function json(status, code, message, requestId, extra = {}) {
   return new Response(JSON.stringify({ error: { code, message, request_id: requestId } }), {
@@ -83,6 +84,7 @@ async function handleApi(request, env, url, requestId) {
 
   const mutating = method !== 'GET';
   if (mutating) {
+    if (request.headers.get('sec-fetch-site') === 'cross-site') return json(403, 'FORBIDDEN', 'Cross-site mutation rejected.', requestId);
     // CSRF lớp 1: Origin bắt buộc và phải đúng origin công khai (kể cả login/register).
     if (request.headers.get('origin') !== publicOrigin(env, url)) return json(403, 'FORBIDDEN', 'Cross-origin request rejected.', requestId);
   }
@@ -113,10 +115,16 @@ async function handleApi(request, env, url, requestId) {
     return json(503, 'ORIGIN_UNAVAILABLE', 'Origin is unavailable.', requestId, { 'Retry-After': '10' });
   }
 
-  if (res.status >= 300 && res.status < 400) return json(502, 'ORIGIN_REDIRECT', 'Unexpected redirect from origin.', requestId);
+  if (res.status >= 300 && res.status < 400) {
+    await res.body?.cancel().catch(() => {});
+    return json(502, 'ORIGIN_REDIRECT', 'Unexpected redirect from origin.', requestId);
+  }
   const ctype = res.headers.get('content-type') || '';
-  const isJson = ctype.toLowerCase().includes('json');
-  if (res.status !== 204 && !isJson) {
+  const mediaType = ctype.split(';')[0].trim().toLowerCase();
+  const isJson = mediaType === 'application/json' || (mediaType.startsWith('application/') && mediaType.endsWith('+json'));
+  const isText = method === 'GET' && res.ok && TEXT_RESPONSE.test(sub) && mediaType === 'text/plain';
+  if (res.status !== 204 && !isJson && !isText) {
+    await res.body?.cancel().catch(() => {});
     // Trang lỗi HTML của tunnel/edge hoặc index.html: không chuyển cho client.
     const down = res.status >= 500;
     return json(down ? 503 : 502, down ? 'ORIGIN_UNAVAILABLE' : 'BAD_ORIGIN_RESPONSE', 'Origin returned an unexpected response.', requestId, down ? { 'Retry-After': '10' } : {});

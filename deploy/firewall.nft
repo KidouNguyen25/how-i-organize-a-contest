@@ -3,33 +3,82 @@
 # Remove only this table to roll back: nft delete table inet contest_demo
 # Do not use 'flush ruleset'. Build/download approved images before this policy.
 table inet contest_demo {
+    # Populate with reviewed service addresses before apply. Empty sets fail closed.
+    set approved_dns_v4 {
+        type ipv4_addr
+        flags interval
+    }
+    set approved_dns_v6 {
+        type ipv6_addr
+        flags interval
+    }
+    set approved_ntp_v4 {
+        type ipv4_addr
+        flags interval
+    }
+    set approved_ntp_v6 {
+        type ipv6_addr
+        flags interval
+    }
+    set approved_tunnel_v4 {
+        type ipv4_addr
+        flags interval
+    }
+    set approved_tunnel_v6 {
+        type ipv6_addr
+        flags interval
+    }
+
     chain input {
         type filter hook input priority -10; policy drop;
-        iifname "lo" accept
         ct state invalid drop
+        iifname != "lo" ip saddr 127.0.0.0/8 counter drop
+        iifname != "lo" ip6 saddr ::1 counter drop
+        iifname "lo" accept
         ct state established,related accept
-        ip protocol icmp limit rate 10/second burst 20 packets accept
-        # ICMPv6 is required for neighbor discovery and path MTU.
-        meta l4proto ipv6-icmp accept
+        ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        # Neighbor discovery and path MTU need these ICMPv6 types.
+        meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
         # No public SSH/API/database/Docker listener is admitted.
         # Add a reviewed private management CIDR here if console is insufficient.
+        jump denied_input
     }
     chain forward {
         type filter hook forward priority -10; policy drop;
         ct state invalid drop
-        ct state established,related accept
-        # Blocks new forwarded/published container connections before Docker rules.
-        # Contest bot/compiler containers must additionally use network=none.
+        # This VM does not route traffic. Drop all Docker forwarding before Docker rules.
+        jump denied_forward
     }
     chain output {
         type filter hook output priority -10; policy drop;
+        ct state invalid drop
         oifname "lo" accept
         ct state established,related accept
-        udp dport { 53, 123, 7844 } accept
-        tcp dport { 53, 443, 7844 } accept
-        ip protocol icmp accept
-        meta l4proto ipv6-icmp accept
-        # DHCP, proxy and nonstandard DNS need explicit rules if the VM uses them.
-        # Restrict destinations to the reviewed DNS/NTP/Cloudflare endpoints.
+        ip daddr @approved_dns_v4 udp dport 53 accept
+        ip daddr @approved_dns_v4 tcp dport 53 accept
+        ip daddr @approved_ntp_v4 udp dport 123 accept
+        ip daddr @approved_tunnel_v4 udp dport 7844 accept
+        ip daddr @approved_tunnel_v4 tcp dport { 443, 7844 } accept
+        ip6 daddr @approved_dns_v6 udp dport 53 accept
+        ip6 daddr @approved_dns_v6 tcp dport 53 accept
+        ip6 daddr @approved_ntp_v6 udp dport 123 accept
+        ip6 daddr @approved_tunnel_v6 udp dport 7844 accept
+        ip6 daddr @approved_tunnel_v6 tcp dport { 443, 7844 } accept
+        ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept
+        # Add explicit DHCP, proxy, or nonstandard DNS rules only after review.
+        jump denied_output
+    }
+    chain denied_input {
+        limit rate 2/second burst 5 packets log prefix "contest input denied: "
+        counter drop
+    }
+    chain denied_forward {
+        limit rate 2/second burst 5 packets log prefix "contest forward denied: "
+        counter drop
+    }
+    chain denied_output {
+        limit rate 2/second burst 5 packets log prefix "contest output denied: "
+        counter drop
     }
 }

@@ -186,8 +186,10 @@ def inspect_database(path: str | Path) -> dict[str, Any]:
                 if not entry or entry["tournament_id"] != receipt["tournament_id"] or entry["user_id"] != receipt["user_id"]:
                     raise BackupError("Accepted receipt ownership does not match its entry.")
                 if receipt["status"] == "READY":
-                    bot = con.execute("SELECT source_sha256,tournament_id,user_id FROM bot_submissions WHERE id=?",(receipt["bot_id"],)).fetchone()
-                    if not bot or bot["source_sha256"] != receipt["source_hash"] or bot["tournament_id"] != receipt["tournament_id"] or bot["user_id"] != receipt["user_id"]:
+                    bot = con.execute("SELECT source_sha256,tournament_id,user_id,language FROM bot_submissions WHERE id=?",(receipt["bot_id"],)).fetchone()
+                    language = receipt["language"] if "language" in receipt.keys() else "cpp17"
+                    if (not bot or bot["source_sha256"] != receipt["source_hash"] or bot["tournament_id"] != receipt["tournament_id"]
+                            or bot["user_id"] != receipt["user_id"] or bot["language"] != language):
                         raise BackupError("Completed receipt differs from its submitted bot.")
         result_summary = _table_digest(con, "matches", result_columns, ["id"])
         schema = [tuple(row) for row in con.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")]

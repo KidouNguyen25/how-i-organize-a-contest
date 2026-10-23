@@ -4,7 +4,7 @@ Các lệnh dưới đây dành cho người vận hành. Chưa áp firewall ho�
 
 ## Phạm vi hiện tại
 
-- SQLite schema 2 có migration từ schema 1, lease, fencing, attempt và khóa tài nguyên dùng chung.
+- SQLite schema 4 có migration từ schema 1/2/3, ngôn ngữ bản nháp/receipt, lease, fencing, attempt và khóa tài nguyên dùng chung.
 - OTT đi qua registry adapter. Transport và schema trận vẫn dùng hai bên white/black; chưa thay thế contract đa loại giải của phần A05.
 - Source cuối được lưu bền vững trước biên dịch, trả HTTP 202 và giữ thời điểm nhận. Theo dõi `GET /api/v1/tournaments/{id}/code`, trường `pending_submission`.
 - API và match dispatcher có thể chạy riêng trên cùng Linux VM. Compiler vẫn được gọi từ API; `--no-dispatch` không tạo ranh giới cách ly compiler khỏi API.
@@ -17,9 +17,9 @@ Yêu cầu Python 3.11 trở lên. Demo Docker cần Linux containers và Docker
 Trước khi đổi DB cũ, dừng mọi API, worker, compiler và phiên bản cũ; tạo backup. Không chạy migration trực tiếp trên bản dữ liệu duy nhất.
 
 ```sh
-python -m ott backup --data data --destination ../contest-backup-before-v2 --offline
-python -m ott migrate-copy ../contest-backup-before-v2 --destination ../contest-data-v2
-python -m ott verify-backup ../contest-backup-before-v2
+python -m ott backup --data data --destination ../contest-backup-before-v3 --offline
+python -m ott migrate-copy ../contest-backup-before-v3 --destination ../contest-data-v3
+python -m ott verify-backup ../contest-backup-before-v3
 ```
 
 Nếu chưa có DB, tạo tài khoản mẫu. Mật khẩu ngẫu nhiên chỉ ghi vào `data/seed-accounts.json`; file này không vào backup.
@@ -27,7 +27,7 @@ Nếu chưa có DB, tạo tài khoản mẫu. Mật khẩu ngẫu nhiên chỉ g
 ```sh
 python -m ott seed --data data
 python -m ott build-image --image ott-bot-runner
-python -m ott build-image --target runtime --image contest-bot-runtime
+python -m ott build-image --target runtime --image ott-bot-runtime
 ```
 
 `build-image --base-image name@sha256:digest` cho phép khóa base image đã được duyệt. Runtime luôn dùng image ID thực đọc từ Docker, không chạy theo tag đang thay đổi.
@@ -35,8 +35,8 @@ python -m ott build-image --target runtime --image contest-bot-runtime
 BTC rà source mẫu rồi tạo allowlist trên Linux:
 
 ```sh
-python -m ott source-hashes --normalize-newlines samples/bot_template.cpp > data/approved-sources.json
-python -m ott serve --profile demo --data data --runner docker --runtime-image contest-bot-runtime --source-allowlist data/approved-sources.json
+python -m ott source-hashes --normalize-newlines samples/bot_template.cpp samples/bot_template.c samples/bot_template.rs samples/bot_template.go samples/bot_template.java > data/approved-sources.json
+python -m ott serve --profile demo --data data --runner docker --runtime-image ott-bot-runtime --source-allowlist data/approved-sources.json
 ```
 
 Trên PowerShell, ghi kết quả JSON với UTF-8, không dùng chuyển hướng tạo UTF-16. `--normalize-newlines` chọn dạng LF mà textarea gửi trước khi BTC duyệt hash; nếu bỏ cờ này, hash giữ nguyên byte của file. Không chuẩn hóa source sau khi đã nhận và tính hash.
@@ -50,7 +50,7 @@ Artifact cũ thiếu manifest sẽ bị chặn. Chuẩn bị bản nộp mới c
 Trên Linux, chạy API với `--no-dispatch` và tiến trình thứ hai cùng profile/data/image/allowlist:
 
 ```sh
-python -m ott worker --profile demo --data data --runner docker --runtime-image contest-bot-runtime --source-allowlist data/approved-sources.json
+python -m ott worker --profile demo --data data --runner docker --runtime-image ott-bot-runtime --source-allowlist data/approved-sources.json
 ```
 
 Hai tiến trình giữ shared lock dữ liệu; backup cần exclusive lock nên bị chặn khi runtime còn chạy. API có thêm exclusive role lock để chỉ có một API nhận bài. Windows dùng khóa bảo thủ độc quyền, vì vậy chạy chế độ gộp hoặc chuyển sang Linux VM.
@@ -73,9 +73,9 @@ Polling màn hình nộp bài dùng 10 giây và dừng tab ẩn. Polling tổng
 
 ## Firewall và systemd
 
-`firewall.nft` là profile cho Linux VM riêng: chặn inbound mới, chặn forwarding mới, chỉ cho outbound DNS/NTP/HTTPS/Tunnel theo cổng. Không mở SSH công khai, API, DB hoặc Docker TCP. Rule inet áp cả IPv4/IPv6 và chặn forwarding trước chain Docker. Không phụ thuộc UFW để bảo vệ published ports.
+`firewall.nft` là profile cho Linux VM riêng: chặn inbound mới, chặn toàn bộ forwarding, chỉ cho outbound DNS/NTP/HTTPS/Tunnel tới IP theo set riêng đã duyệt. Sáu set IPv4/IPv6 ban đầu rỗng nên kết nối mới ra ngoài bị chặn cho tới khi người vận hành thêm IP DNS, NTP và Tunnel đã rà soát. Mỗi set chỉ mở cổng cần cho dịch vụ đó. Không mở SSH công khai, API, DB hoặc Docker TCP. Rule inet áp cả IPv4/IPv6 và chặn forwarding trước chain Docker. Không phụ thuộc UFW để bảo vệ published ports.
 
-Rà interface, DNS/NTP, DHCP và đích Cloudflare trên VM thật. Profile chưa giới hạn IP đích outbound; người vận hành phải bổ sung danh sách được duyệt. Có console và bản rollback trước khi áp. Dùng `nft -c -f deploy/firewall.nft` để kiểm cấu hình trước; rollback chỉ xóa bảng `inet contest_demo`. Không flush toàn bộ ruleset. Image build qua Docker bridge có thể bị chặn, nên chuẩn bị image trước cửa sổ demo.
+Rà interface, DNS/NTP, DHCP và đích Cloudflare trên VM thật. Điền các set `approved_dns_v4/v6`, `approved_ntp_v4/v6` và `approved_tunnel_v4/v6` theo hạ tầng thực tế; cập nhật IP khi nhà cung cấp đổi endpoint. Có console và bản rollback trước khi áp. Dùng `nft -c -f deploy/firewall.nft` để kiểm cấu hình trước; rollback chỉ xóa bảng `inet contest_demo`. Không flush toàn bộ ruleset. Image build qua Docker bridge bị chặn, nên chuẩn bị image trước cửa sổ demo.
 
 `contest.service` dùng tài khoản vận hành tin cậy `contest`, checkout `/opt/contest`, data `/srv/contest/data`, workspace `/srv/contest/work`, môi trường `/etc/contest/demo.env` và allowlist `/etc/contest/source-allowlist.json`. Tạo các đường dẫn/quyền tương ứng trước khi cài service. `TMPDIR` phải nhìn thấy được từ Docker daemon, vì vậy không đặt bind source trong private `/tmp` của systemd. Quyền nhóm Docker vẫn tương đương đặc quyền host; chỉ dùng VM chuyên biệt và source mẫu đã duyệt.
 

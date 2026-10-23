@@ -38,7 +38,7 @@ Trang suất dự thi có vùng tải/chọn source C++17, trạng thái biên d
 
 ```text
 Bot dự thi: OTT v1
-Ngôn ngữ: C++17
+Ngôn ngữ: C++17, C17, Rust 2021, Go hoặc Java 17
 Phiên bản đang chọn: bot-03 · Biên dịch thành công
 [Gửi phiên bản mới]                         [Chọn phiên bản]
 ```

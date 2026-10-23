@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from core.languages import LANGUAGES
 from judge.protocol import MAX_LINE_BYTES, MAX_SOURCE_BYTES, PROTOCOL_VERSION
 
 
@@ -107,9 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     login = commands.add_parser("login", help="verify account credentials")
     login.add_argument("--username", required=True)
 
-    submit = commands.add_parser("submit", help="submit one C++17 source file")
+    submit = commands.add_parser("submit", help="submit one native source file")
     submit.add_argument("problem_id")
     submit.add_argument("source", type=Path)
+    submit.add_argument("--language", choices=tuple(LANGUAGES), default="cpp17")
     submit.add_argument("--username", required=True)
 
     result = commands.add_parser("result", help="read submission status or result")
@@ -158,7 +160,7 @@ async def run_command(args: argparse.Namespace) -> dict[str, Any]:
             token = await client.login(args.username, password)
             return await client.request(
                 "SUBMIT",
-                {"problem_id": args.problem_id, "language": "cpp17", "source": source},
+                {"problem_id": args.problem_id, "language": args.language, "source": source},
                 token,
             )
         if args.command == "result":

@@ -7,11 +7,14 @@ import hmac
 import json
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+
+from core.languages import language_profile
 
 
 SESSION_TTL_SECONDS = 12 * 60 * 60
@@ -50,19 +53,43 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._connections = threading.local()
         self._initialize()
+
+    def enable_thread_connection_reuse(self) -> None:
+        self._connections.enabled = True
+
+    def close_thread_connection(self) -> None:
+        connection = getattr(self._connections, "connection", None)
+        try:
+            if connection is not None:
+                try:
+                    if connection.in_transaction:
+                        connection.rollback()
+                finally:
+                    connection.close()
+        finally:
+            if hasattr(self._connections, "connection"):
+                del self._connections.connection
+            self._connections.enabled = False
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
+        reuse = getattr(self._connections, "enabled", False)
+        connection = getattr(self._connections, "connection", None) if reuse else None
+        if connection is None:
+            connection = sqlite3.connect(self.path, timeout=10)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 10000")
+            if reuse:
+                self._connections.connection = connection
         try:
             with connection:
                 yield connection
         finally:
-            connection.close()
+            if not reuse:
+                connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -96,11 +123,19 @@ class Database:
                     updated_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS submissions_user_created_idx
-                    ON submissions(user_id, created_at DESC);
+                    ON submissions(user_id);
                 CREATE INDEX IF NOT EXISTS submissions_queue_idx
-                    ON submissions(status, created_at);
+                    ON submissions(status);
                 """
             )
+            for index_name, column in (
+                ("submissions_user_created_idx", "user_id"),
+                ("submissions_queue_idx", "status"),
+            ):
+                columns = tuple(row["name"] for row in connection.execute(f"PRAGMA index_info({index_name})"))
+                if columns != (column,):
+                    connection.execute(f"DROP INDEX IF EXISTS {index_name}")
+                    connection.execute(f"CREATE INDEX {index_name} ON submissions({column})")
             connection.execute(
                 "UPDATE submissions SET status = 'QUEUED', updated_at = ? WHERE status = 'RUNNING'",
                 (_now(),),
@@ -150,7 +185,8 @@ class Database:
             ).fetchone()
         return int(row["user_id"]) if row else None
 
-    def create_submission(self, user_id: int, problem_id: str, source: str) -> str:
+    def create_submission(self, user_id: int, problem_id: str, source: str, language: str = "cpp17") -> str:
+        language_profile(language)
         submission_id = str(uuid.uuid4())
         now = _now()
         with self._connect() as connection:
@@ -158,33 +194,33 @@ class Database:
                 """
                 INSERT INTO submissions(
                     id, user_id, problem_id, language, source, status, created_at, updated_at
-                ) VALUES (?, ?, ?, 'cpp17', ?, 'QUEUED', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
-                (submission_id, user_id, problem_id, source, now, now),
+                (submission_id, user_id, problem_id, language, source, now, now),
             )
         return submission_id
 
     def claim_next_submission(self) -> dict[str, Any] | None:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """
-                SELECT id, user_id, problem_id, language, source
-                FROM submissions
-                WHERE status = 'QUEUED'
-                ORDER BY rowid
-                LIMIT 1
-                """
-            ).fetchone()
-            if row is None:
-                connection.commit()
-                return None
-            connection.execute(
-                "UPDATE submissions SET status = 'RUNNING', updated_at = ? WHERE id = ?",
-                (_now(), row["id"]),
+            select_next = (
+                "SELECT id, user_id, problem_id, language, source FROM submissions "
+                "WHERE status='QUEUED' ORDER BY rowid LIMIT 1"
             )
+            row = connection.execute(select_next).fetchone()
+            if row is None:
+                return None
+            connection.execute("BEGIN IMMEDIATE")
+            while row is not None:
+                changed = connection.execute(
+                    "UPDATE submissions SET status='RUNNING',updated_at=? WHERE id=? AND status='QUEUED'",
+                    (_now(), row["id"]),
+                ).rowcount
+                if changed == 1:
+                    connection.commit()
+                    return dict(row)
+                row = connection.execute(select_next).fetchone()
             connection.commit()
-            return dict(row)
+            return None
 
     def finish_submission(
         self,

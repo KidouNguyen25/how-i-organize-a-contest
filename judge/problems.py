@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.languages import LANGUAGES
+
 
 PROBLEM_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
@@ -41,6 +43,7 @@ class Problem:
             "time_limit_ms": self.time_limit_ms,
             "memory_limit_mb": self.memory_limit_mb,
             "language": "cpp17",
+            "languages": list(LANGUAGES),
             "test_count": len(self.tests),
             "total_points": sum(test.points for test in self.tests),
         }

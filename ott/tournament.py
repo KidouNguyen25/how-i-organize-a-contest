@@ -7,44 +7,66 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from ott.runner import MatchRunner
-from ott.store import Store
+from ott.store import Lease, Store
 
 LOG = logging.getLogger("ott.scheduler")
 POINTS = {"win": 3, "draw": 1, "loss": 0}
+_MATCH_POINTS = {"WHITE_WIN": (3, 0), "BLACK_WIN": (0, 3), "DRAW": (1, 1)}
+ScheduleRow = tuple[int, int, int, str, str]
+
+
+def iter_round_robin_rows(entry_ids: list[str]) -> Iterator[ScheduleRow]:
+    """Yield compact circle-method rows without allocating one dict per match."""
+    slots: list[int | None] = list(range(len(entry_ids)))
+    if len(slots) % 2:
+        slots.append(None)
+    n = len(slots)
+    for leg in (1, 2):
+        rotation = slots[:]
+        for r_idx in range(1, n):
+            pairing = 0
+            for i in range(n // 2):
+                a, b = rotation[i], rotation[n - 1 - i]
+                if a is None or b is None:
+                    continue
+                pairing += 1
+                first, second = (a, b) if a < b else (b, a)
+                white, black = (first, second) if leg == 1 else (second, first)
+                white_id, black_id = entry_ids[white], entry_ids[black]
+                yield r_idx, leg, pairing, white_id, black_id
+            rotation.insert(1, rotation.pop())
+
+
+def iter_round_robin(entry_ids: list[str]) -> Iterator[dict[str, Any]]:
+    """Yield dictionary rows for callers that need named fields."""
+    for round_no, leg_no, pairing_no, white_id, black_id in iter_round_robin_rows(entry_ids):
+        yield {"round_no": round_no, "leg_no": leg_no, "pairing_no": pairing_no,
+               "white": white_id, "black": black_id}
 
 
 def round_robin(entry_ids: list[str]) -> list[dict[str, Any]]:
     """Circle-method double round robin. Roster order decides colours; leg 2 swaps them."""
-    slots: list[str | None] = list(entry_ids)
-    if len(slots) % 2:
-        slots.append(None)
-    n = len(slots)
-    rows: list[dict[str, Any]] = []
-    rotation = slots[:]
-    rounds: list[list[tuple[str | None, str | None]]] = []
-    for _ in range(n - 1):
-        rounds.append([(rotation[i], rotation[n - 1 - i]) for i in range(n // 2)])
-        rotation = [rotation[0], rotation[-1]] + rotation[1:-1]
-    order = {eid: i for i, eid in enumerate(entry_ids)}
-    for leg in (1, 2):
-        for r_idx, pairs in enumerate(rounds, start=1):
-            pairing = 0
-            for a, b in pairs:
-                if a is None or b is None:
-                    continue
-                pairing += 1
-                first, second = (a, b) if order[a] < order[b] else (b, a)
-                white, black = (first, second) if leg == 1 else (second, first)
-                rows.append({"round_no": r_idx, "leg_no": leg, "pairing_no": pairing, "white": white, "black": black})
-    return rows
+    return list(iter_round_robin(entry_ids))
 
 
 def byes(entry_ids: list[str], matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(entry_ids) % 2 == 0:
+    team_count = len(entry_ids)
+    if team_count % 2 == 0 or not matches:
         return []
+
+    # create_matches stores the full double round-robin atomically. In that case,
+    # circle rotation gives one bye per team, in roster order, on each leg.
+    if len(matches) == team_count * (team_count - 1):
+        return [
+            {"leg_no": leg, "round_no": round_no, "entry_id": entry_id}
+            for leg in (1, 2)
+            for round_no, entry_id in enumerate(entry_ids, start=1)
+        ]
+
+    # Preserve participant-based behavior for partial schedules.
     out = []
     seen = {(m["leg_no"], m["round_no"]): set() for m in matches}
     for m in matches:
@@ -56,31 +78,80 @@ def byes(entry_ids: list[str], matches: list[dict[str, Any]]) -> list[dict[str, 
     return out
 
 
-def standings(entries: list[dict[str, Any]], matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def standings(entries: list[dict[str, Any]], matches: list[dict[str, Any]], *,
+              matches_in_schedule_order: bool = False,
+              matches_are_finished: bool = False) -> list[dict[str, Any]]:
     by_entry = {
         e["id"]: {"entry_id": e["id"], "username": e["username"], "points": 0, "wins": 0, "draws": 0, "losses": 0, "played": 0, "sheet": []}
         for e in entries
     }
-    finished = sorted((m for m in matches if m["status"] == "FINISHED"), key=lambda m: (m["leg_no"], m["round_no"], m["pairing_no"]))
-    h2h: dict[tuple[str, str], int] = {}
-    for m in finished:
-        w, b = by_entry.get(m["white_entry_id"]), by_entry.get(m["black_entry_id"])
-        if not w or not b:
-            continue
-        res = m["result"]
-        pw, pb = {"WHITE_WIN": (3, 0), "BLACK_WIN": (0, 3), "DRAW": (1, 1)}[res]
-        for row, pts, other in ((w, pw, b), (b, pb, w)):
-            row["points"] += pts
-            row["played"] += 1
-            key = "wins" if pts == 3 else "draws" if pts == 1 else "losses"
-            row[key] += 1
-            row["sheet"].append("w" if pts == 3 else "d" if pts == 1 else "l")
-            h2h[(row["entry_id"], other["entry_id"])] = h2h.get((row["entry_id"], other["entry_id"]), 0) + pts
     rows = list(by_entry.values())
+    entry_index = {row["entry_id"]: index for index, row in enumerate(rows)}
+    if matches_are_finished:
+        finished = matches if matches_in_schedule_order else list(matches)
+    else:
+        finished = [m for m in matches if m["status"] == "FINISHED"]
+    if not matches_in_schedule_order:
+        finished.sort(key=lambda m: (m["leg_no"], m["round_no"], m["pairing_no"]))
+    entry_count = len(rows)
+    dense_h2h = entry_count >= 32 and len(finished) >= entry_count * (entry_count - 1) // 4
+    if dense_h2h:
+        # OTT double round-robin pair can score at most six points per direction.
+        h2h_matrix = [bytearray(entry_count) for _ in rows]
+        h2h_scores: dict[int, int] = {}
+    else:
+        h2h_matrix = []
+        h2h_scores = {}
+    for m in finished:
+        white_index = entry_index.get(m["white_entry_id"])
+        black_index = entry_index.get(m["black_entry_id"])
+        if white_index is None or black_index is None:
+            continue
+        w, b = rows[white_index], rows[black_index]
+        pw, pb = _MATCH_POINTS[m["result"]]
+        w["points"] += pw
+        b["points"] += pb
+        w["played"] += 1
+        b["played"] += 1
+        if pw == 3:
+            w["wins"] += 1
+            b["losses"] += 1
+        elif pw == 1:
+            w["draws"] += 1
+            b["draws"] += 1
+        else:
+            w["losses"] += 1
+            b["wins"] += 1
+        w["sheet"].append("w" if pw == 3 else "d" if pw == 1 else "l")
+        b["sheet"].append("w" if pb == 3 else "d" if pb == 1 else "l")
+        if dense_h2h:
+            h2h_matrix[white_index][black_index] += pw
+            h2h_matrix[black_index][white_index] += pb
+        else:
+            white_key = white_index * entry_count + black_index
+            black_key = black_index * entry_count + white_index
+            h2h_scores[white_key] = h2h_scores.get(white_key, 0) + pw
+            h2h_scores[black_key] = h2h_scores.get(black_key, 0) + pb
     for row in rows:
-        group = [r["entry_id"] for r in rows if r["points"] == row["points"]]
-        row["h2h"] = sum(h2h.get((row["entry_id"], o), 0) for o in group if o != row["entry_id"])
+        row["h2h"] = 0
         row["diff"] = row["wins"] - row["losses"]
+    if dense_h2h:
+        tied_groups: dict[int, list[int]] = {}
+        for index, row in enumerate(rows):
+            tied_groups.setdefault(row["points"], []).append(index)
+        for index, row in enumerate(rows):
+            total = 0
+            for opponent_index in tied_groups[row["points"]]:
+                if opponent_index != index:
+                    total += h2h_matrix[index][opponent_index]
+            row["h2h"] = total
+    else:
+        for key, points in h2h_scores.items():
+            index = key // entry_count
+            opponent_index = key % entry_count
+            row, opponent = rows[index], rows[opponent_index]
+            if index != opponent_index and row["points"] == opponent["points"]:
+                row["h2h"] += points
     rows.sort(key=lambda r: (-r["points"], -r["h2h"], -r["diff"], r["username"]))
     prev_key, prev_rank = None, 0
     for i, row in enumerate(rows, start=1):
@@ -100,18 +171,28 @@ class Dispatcher(threading.Thread):
         self.stop_event = threading.Event()
         self.owner = uuid.uuid4().hex
 
-    def _launch(self, match: dict[str, Any]) -> None:
+    def _launch(self, match: dict[str, Any], lease: Lease) -> None:
         if (self.data_dir / ".maintenance").exists() or self.stop_event.is_set():
+            self.store.pause_match(match["id"], "INFRA: DISPATCH_STOPPED", lease=lease, retry=True)
             return
-        lease = self.store.claim_match(match["id"], self.owner, max_running=self.workers)
-        if lease is None:
-            return
-        runner = MatchRunner(self.store, self.data_dir, match["id"], lease=lease, stop_event=self.stop_event)
-        thread = threading.Thread(target=runner.run, daemon=True, name=f"match-{match['id'][:8]}")
-        self.active[match["id"]] = (thread, match["white_entry_id"], match["black_entry_id"])
-        thread.start()
+        try:
+            runner = MatchRunner(self.store, self.data_dir, match["id"], lease=lease, stop_event=self.stop_event)
+            thread = threading.Thread(target=runner.run, daemon=True, name=f"match-{match['id'][:8]}")
+            self.active[match["id"]] = (thread, match["white_entry_id"], match["black_entry_id"])
+            thread.start()
+        except Exception:
+            self.active.pop(match["id"], None)
+            self.store.pause_match(match["id"], "INFRA: RUNNER_START_FAILED", lease=lease, retry=True)
+            raise
 
     def run(self) -> None:
+        self.store.enable_thread_connection_reuse()
+        try:
+            self._run_loop()
+        finally:
+            self.store.close_thread_connection()
+
+    def _run_loop(self) -> None:
         while not self.stop_event.is_set():
             try:
                 if (self.data_dir / ".maintenance").exists():
@@ -120,18 +201,14 @@ class Dispatcher(threading.Thread):
                 self.store.recover_running()
                 for mid in [m for m, (t, _, _) in self.active.items() if not t.is_alive()]:
                     del self.active[mid]
-                if len(self.active) < self.workers:
-                    busy = {e for _, w, b in self.active.values() for e in (w, b)}
-                    running = {t["id"] for t in self.store.list_tournaments() if t["status"] == "RUNNING"}
-                    for m in self.store.list_matches(statuses=("SCHEDULED",)):
-                        if len(self.active) >= self.workers:
-                            break
-                        if m["tournament_id"] not in running or m["id"] in self.active:
-                            continue
-                        if m["white_entry_id"] in busy or m["black_entry_id"] in busy:
-                            continue
-                        busy |= {m["white_entry_id"], m["black_entry_id"]}
-                        self._launch(m)
+                while len(self.active) < self.workers and not self.stop_event.is_set():
+                    if (self.data_dir / ".maintenance").exists():
+                        break
+                    claimed = self.store.claim_next_match(self.owner, max_running=self.workers)
+                    if claimed is None:
+                        break
+                    match, lease = claimed
+                    self._launch(match, lease)
             except Exception:  # noqa: BLE001
                 LOG.exception("dispatcher tick failed")
             self.stop_event.wait(0.4)

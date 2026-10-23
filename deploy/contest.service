@@ -12,7 +12,7 @@ SupplementaryGroups=docker
 WorkingDirectory=/opt/contest
 EnvironmentFile=/etc/contest/demo.env
 Environment=TMPDIR=/srv/contest/work
-ExecStart=/opt/contest/.venv/bin/python -m ott serve --profile demo --data /srv/contest/data --runner docker --source-allowlist /etc/contest/source-allowlist.json --host 127.0.0.1 --port 8080 --secure-cookie --no-register --disable-stream
+ExecStart=/opt/contest/.venv/bin/python -m ott serve --profile demo --data /srv/contest/data --runner docker --runtime-image ott-bot-runtime --source-allowlist /etc/contest/source-allowlist.json --host 127.0.0.1 --port 8080 --secure-cookie --no-register --disable-stream
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -24,6 +24,17 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+# The API uses loopback and the Unix Docker socket. Tunnel runs as a separate service.
+IPAddressDeny=any
+IPAddressAllow=localhost
 ReadWritePaths=/srv/contest/data /srv/contest/work
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=

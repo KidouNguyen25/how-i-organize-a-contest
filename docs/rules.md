@@ -7,7 +7,7 @@ Tài liệu này là luật đích cho tournament OTT. Code hiện tại chưa c
 - Một tài khoản có một suất trong mỗi giải.
 - `CONTESTANT` có thể tham gia và gửi bot. `ORGANIZER` có thể tạo/quản lý giải. Người vận hành cấp role organizer; người dùng không tự nâng quyền.
 - Trạng thái giải: `DRAFT`, `REGISTRATION_OPEN`, `LOCKED`, `RUNNING`, `FINISHED`, `CANCELLED`.
-- Giải OTT v1 chỉ hỗ trợ bot C++17 và một trong ba đồng hồ: 300, 600 hoặc 3.600 giây mỗi bên.
+- Giải OTT v1 hỗ trợ bot C++17, C17, Rust 2021, Go và Java 17 cùng một trong ba đồng hồ: 300, 600 hoặc 3.600 giây mỗi bên.
 - Source bot UTF-8 tối đa 256 KiB, cùng giới hạn source của judge hiện có.
 - Một suất chọn một phiên bản bot đã compile thành công. Có thể thay lựa chọn trước `LOCKED`; sau đó phiên bản bất biến.
 - Cần ít nhất hai suất hợp lệ để bắt đầu giải. Bot lỗi compile chưa đủ điều kiện; thí sinh có thể nộp bản sửa trước khi khóa.
@@ -65,7 +65,7 @@ Tài liệu này là luật đích cho tournament OTT. Code hiện tại chưa c
 
 ## Bot protocol v1
 
-Mỗi bot là process C++17 sống trong suốt một ván. Engine chỉ gửi observation khi bot tới lượt. Mỗi observation là một dòng UTF-8 JSON kết thúc bằng LF; bot trả đúng một dòng JSON action. Mỗi dòng tối đa 1 MiB. `stdout` chỉ dành cho protocol; bot ghi chẩn đoán vào `stderr`.
+Mỗi bot là process chạy trong suốt một ván, được biên dịch từ C++17, C17, Rust 2021, Go hoặc Java 17. Engine chỉ gửi observation khi bot tới lượt. Mỗi observation là một dòng UTF-8 JSON kết thúc bằng LF; bot trả đúng một dòng JSON action. Mỗi dòng tối đa 1 MiB. `stdout` chỉ dành cho protocol; bot ghi chẩn đoán vào `stderr`.
 
 Schema chuẩn cho observation/action là [bot-protocol.schema.json](bot-protocol.schema.json). Parser từ chối key JSON trùng và object có property không được định nghĩa. Action phải khớp đúng một schema `place` hoặc `move`; engine vẫn kiểm tra phase, lượt, tọa độ và luật bàn cờ. Không chấp nhận dòng output thứ hai cho cùng observation.
 

@@ -2,7 +2,7 @@
 
 ## Trạng thái
 
-- **Hiện có:** Python judge tĩnh, CLI TCP/TLS, SQLite và Docker runner cho bài C++17. Chi tiết ở [README](../README.md) và [VibeSec](VibeSec.md).
+- **Hiện có:** Python judge tĩnh, CLI TCP/TLS, SQLite và Docker runner cho C++17, C17, Rust 2021 và Go. Chi tiết ở [README](../README.md) và [VibeSec](VibeSec.md).
 - **Thiết kế đích:** HTTPS gateway, dịch vụ giải, OTT engine và runner bot tương tác. Chưa có thành phần OTT nào trong code.
 - **Mockup:** [web tĩnh](../mockup/index.html), chạy bằng dữ liệu trong trình duyệt. Mockup không gọi API và không đại diện cho backend đã triển khai.
 
@@ -44,7 +44,7 @@ Sơ đồ là thiết kế mục tiêu. Web gateway là reverse proxy cùng orig
 ### Gửi và chốt bot
 
 1. Thí sinh đăng nhập qua HTTPS; browser giữ cookie phiên `Secure`, `HttpOnly`, `SameSite`.
-2. Thí sinh đăng ký tối đa một suất mỗi giải và tải source C++17, tối đa 256 KiB.
+2. Thí sinh đăng ký tối đa một suất mỗi giải và gửi source `cpp17`, `c17`, `rust2021`, `go` hoặc `java17`, tối đa 256 KiB.
 3. Dịch vụ tạo phiên bản bất biến và compile bot trong sandbox. Bản compile lỗi không thể được chọn.
 4. Thí sinh chọn bản compile thành công trước khi giải chuyển sang `LOCKED`.
 5. Organizer khóa roster; server đóng băng bot đã chọn và sinh lịch vòng tròn hai lượt.

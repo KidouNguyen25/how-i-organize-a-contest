@@ -39,7 +39,7 @@ Chỉ mục `sessions_expiry_idx(expires_at)`.
 | `id` | TEXT | PRIMARY KEY | UUID bài nộp |
 | `user_id` | INTEGER | NOT NULL, FK `users.id` | Chủ bài |
 | `problem_id` | TEXT | NOT NULL | ID bài tĩnh |
-| `language` | TEXT | NOT NULL | Hiện là `cpp17` |
+| `language` | TEXT | NOT NULL | `cpp17`, `c17`, `rust2021`, `go` hoặc `java17` |
 | `source` | TEXT | NOT NULL | Source bài tĩnh |
 | `status` | TEXT | NOT NULL | `QUEUED`, `RUNNING`, `FINISHED`, `SYSTEM_ERROR` |
 | `verdict` | TEXT | nullable | Verdict chấm test |
@@ -85,7 +85,7 @@ Mỗi upload tạo phiên bản mới bất biến. Binary compile nằm ngoài 
 | `id` | TEXT | PRIMARY KEY | UUID phiên bản bot |
 | `tournament_id` | TEXT | NOT NULL, FK `tournaments.id` | Game/version đích |
 | `user_id` | INTEGER | NOT NULL, FK `users.id` | Người gửi |
-| `language` | TEXT | NOT NULL | `cpp17` |
+| `language` | TEXT | NOT NULL | `cpp17`, `c17`, `rust2021`, `go` hoặc `java17` |
 | `source` | TEXT | NULL sau retention | Source bot; xóa sau 90 ngày |
 | `source_sha256` | TEXT | NOT NULL | Hash source |
 | `compile_status` | TEXT | NOT NULL | `QUEUED`, `READY`, `CE` |

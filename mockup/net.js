@@ -6,11 +6,16 @@ export function createNet({
   tunnel = false, pollMs = 10000, doc = globalThis.document,
   now = Date.now, setT = setTimeout, clearT = clearTimeout, random = Math.random,
 } = {}) {
-  const state = { fails: 0, until: 0 };
+  const state = { fails: 0, until: 0, failureEpoch: 0 };
   const handles = new Set();
 
-  const noteOk = () => { state.fails = 0; state.until = 0; };
+  const noteOk = (observedEpoch = state.failureEpoch) => {
+    if (observedEpoch !== state.failureEpoch) return false;
+    state.fails = 0; state.until = 0;
+    return true;
+  };
   const noteFailure = (retryAfterSec = 0) => {
+    state.failureEpoch++;
     state.fails = Math.min(state.fails + 1, 8);
     let delay = retryAfterSec > 0 ? retryAfterSec * 1000 : Math.min(60000, 2000 * 2 ** (state.fails - 1));
     delay = Math.min(delay, 120000) + Math.floor(random() * 500);

@@ -26,7 +26,10 @@ from ott.security import ServerPolicy
 from ott.store import Store
 from ott.tournament import Dispatcher
 
-ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+ROOT = PACKAGE_ROOT if (PACKAGE_ROOT / "pyproject.toml").is_file() else Path.cwd()
+WEB_ROOT = PACKAGE_ROOT / "mockup"
+DOCKER_CONTEXT = Path(__file__).resolve().parent / "docker"
 SEED_USERS = [("organizer", "ORGANIZER"), ("team_alpha", "CONTESTANT"), ("team_beta", "CONTESTANT"),
               ("team_gamma", "CONTESTANT"), ("team_delta", "CONTESTANT")]
 
@@ -71,11 +74,14 @@ def _sandbox(args):
     hashes = _hashes(args.source_allowlist)
     if args.profile == "demo" and hashes is None:
         raise ValueError("Demo requires --source-allowlist containing organizer-approved source hashes.")
-    sandbox = make_sandbox(args.runner, args.image, runtime_image=args.runtime_image,
+    runtime_image = args.runtime_image or ("ott-bot-runtime" if args.profile == "demo" else None)
+    sandbox = make_sandbox(args.runner, args.image, runtime_image=runtime_image,
                            allowed_source_hashes=hashes)
     ok, detail = sandbox.available()
     if not ok:
         raise InfraError(f"Runner unavailable: {detail}")
+    if args.profile == "demo" and sandbox.compiler_image_id == sandbox.runtime_image_id:
+        raise ValueError("Demo requires separate compiler and runtime images.")
     runner.set_sandbox(sandbox)
     return sandbox
 
@@ -102,7 +108,7 @@ def main() -> None:
     _runtime_options(p_serve)
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8080)
-    p_serve.add_argument("--web", type=Path, default=ROOT / "mockup")
+    p_serve.add_argument("--web", type=Path, default=WEB_ROOT)
     p_serve.add_argument("--no-register", action="store_true")
     p_serve.add_argument("--secure-cookie", action="store_true")
     p_serve.add_argument("--no-dispatch", action="store_true", help="run a separate worker for matches; compilation remains in this API")
@@ -143,12 +149,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     try:
         if args.cmd == "build-image":
-            command = ["docker", "build", "--target", args.target, "-f", str(ROOT / "docker" / "Dockerfile.bot"), "-t", args.image]
+            command = ["docker", "build", "--target", args.target, "-f", str(DOCKER_CONTEXT / "Dockerfile.bot"), "-t", args.image]
             if args.base_image:
                 if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", args.base_image):
                     raise ValueError("--base-image must be pinned by a SHA-256 digest.")
                 command += ["--build-arg", "BASE_IMAGE=" + args.base_image]
-            sys.exit(subprocess.call(command + [str(ROOT / "docker")]))
+            sys.exit(subprocess.call(command + [str(DOCKER_CONTEXT)]))
         if args.cmd == "source-hashes":
             hashes = []
             for path in args.sources:

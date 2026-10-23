@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from array import array
 from typing import Any
 from core.models import Entry, EvaluationResult, StandingRow, Standings, Verdict
 
@@ -43,7 +44,13 @@ class TestSuiteWeightedSumScorer(BaseScorer):
                 # Keep highest score, tiebreak by lowest execution time
                 curr = results_by_entry.get(entry_id)
                 new_score = res.raw_metrics.get("score", 0.0)
-                if curr is None or new_score > curr.raw_metrics.get("score", 0.0):
+                if curr is None:
+                    results_by_entry[entry_id] = res
+                    continue
+                curr_score = curr.raw_metrics.get("score", 0.0)
+                if (new_score > curr_score or
+                        (new_score == curr_score and
+                         res.resource_usage.get("cpu_time_ms", 0) < curr.resource_usage.get("cpu_time_ms", 0))):
                     results_by_entry[entry_id] = res
 
         rows: list[StandingRow] = []
@@ -112,17 +119,33 @@ class BotArenaMatchPointsScorer(BaseScorer):
         pts_loss = config.get("points_loss", 0.0)
 
         entry_map = {e.entry_id: e for e in entries}
-        stats: dict[str, dict[str, Any]] = {
-            e.entry_id: {
+        entry_ids = list(entry_map)
+        entry_index = {entry_id: index for index, entry_id in enumerate(entry_ids)}
+        entry_count = len(entry_ids)
+        max_h2h_points = max(len(results), 1)
+        integer_scoring = all(
+            (isinstance(value, int) or (isinstance(value, float) and value.is_integer()))
+            and abs(value) * max_h2h_points <= 2**53
+            for value in (pts_win, pts_draw, pts_loss)
+        )
+        # Integer awards keep matrix summation exact; fractional scoring keeps insertion order.
+        dense_h2h = (
+            32 <= entry_count <= 2048
+            and len(results) >= entry_count * (entry_count - 1) // 4
+            and integer_scoring
+        )
+        stats: list[dict[str, Any]] = [
+            {
                 "points": 0.0,
                 "wins": 0,
                 "draws": 0,
                 "losses": 0,
                 "played": 0,
-                "h2h": {}  # (other_entry_id) -> points won against them
+                **({} if dense_h2h else {"h2h": {}}),
             }
-            for e in entries
-        }
+            for _ in entry_ids
+        ]
+        h2h_matrix = array("d", [0.0]) * (entry_count * entry_count) if dense_h2h else array("d")
 
         # Process each match result
         for res in results:
@@ -130,34 +153,42 @@ class BotArenaMatchPointsScorer(BaseScorer):
                 continue
             white_id = res.raw_metrics.get("white_entry_id")
             black_id = res.raw_metrics.get("black_entry_id")
-            if not white_id or not black_id or white_id not in stats or black_id not in stats:
+            white_index = entry_index.get(white_id)
+            black_index = entry_index.get(black_id)
+            if not white_id or not black_id or white_index is None or black_index is None:
                 continue
+            white_stats, black_stats = stats[white_index], stats[black_index]
 
             v = res.verdict.name if hasattr(res.verdict, "name") else str(res.verdict)
             if v == "WHITE_WIN":
                 pw, pb = pts_win, pts_loss
-                stats[white_id]["wins"] += 1
-                stats[black_id]["losses"] += 1
+                white_stats["wins"] += 1
+                black_stats["losses"] += 1
             elif v == "BLACK_WIN":
                 pw, pb = pts_loss, pts_win
-                stats[black_id]["wins"] += 1
-                stats[white_id]["losses"] += 1
+                black_stats["wins"] += 1
+                white_stats["losses"] += 1
             else:  # DRAW
                 pw, pb = pts_draw, pts_draw
-                stats[white_id]["draws"] += 1
-                stats[black_id]["draws"] += 1
+                white_stats["draws"] += 1
+                black_stats["draws"] += 1
 
-            stats[white_id]["points"] += pw
-            stats[black_id]["points"] += pb
-            stats[white_id]["played"] += 1
-            stats[black_id]["played"] += 1
+            white_stats["points"] += pw
+            black_stats["points"] += pb
+            white_stats["played"] += 1
+            black_stats["played"] += 1
 
-            stats[white_id]["h2h"][black_id] = stats[white_id]["h2h"].get(black_id, 0.0) + pw
-            stats[black_id]["h2h"][white_id] = stats[black_id]["h2h"].get(white_id, 0.0) + pb
+            if dense_h2h:
+                h2h_matrix[white_index * entry_count + black_index] += pw
+                h2h_matrix[black_index * entry_count + white_index] += pb
+            else:
+                white_stats["h2h"][black_index] = white_stats["h2h"].get(black_index, 0.0) + pw
+                black_stats["h2h"][white_index] = black_stats["h2h"].get(white_index, 0.0) + pb
 
         # Calculate Head-to-Head points for tied groups and build rows
         rows: list[StandingRow] = []
-        for e_id, s in stats.items():
+        for index, e_id in enumerate(entry_ids):
+            s = stats[index]
             entry = entry_map[e_id]
             diff = float(s["wins"] - s["losses"])
             rows.append(StandingRow(
@@ -176,11 +207,22 @@ class BotArenaMatchPointsScorer(BaseScorer):
                 }
             ))
 
-        # Compute head-to-head within groups of identical points
-        for row in rows:
-            tied_peer_ids = [r.entry_id for r in rows if r.points == row.points and r.entry_id != row.entry_id]
-            h2h_sum = sum(stats[row.entry_id]["h2h"].get(peer_id, 0.0) for peer_id in tied_peer_ids)
-            row.head_to_head_points = h2h_sum
+        # Sum played head-to-head matches within each points group.
+        if dense_h2h:
+            tied_groups: dict[float, list[int]] = {}
+            for index, row in enumerate(rows):
+                tied_groups.setdefault(row.points, []).append(index)
+            for index, row in enumerate(rows):
+                total = 0.0
+                for opponent_index in tied_groups[row.points]:
+                    if opponent_index != index:
+                        total += h2h_matrix[index * entry_count + opponent_index]
+                row.head_to_head_points = total
+        else:
+            for index, state in enumerate(stats):
+                for opponent_index, points in state["h2h"].items():
+                    if opponent_index != index and stats[opponent_index]["points"] == state["points"]:
+                        rows[index].head_to_head_points += points
 
         # Multi-level tiebreak: Points (desc) -> H2H (desc) -> Diff (desc) -> Registration Time (asc) -> Entry ID (asc)
         rows.sort(key=lambda r: (

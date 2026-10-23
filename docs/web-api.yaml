@@ -251,7 +251,11 @@ paths:
                 source:
                   type: string
                   format: binary
-                  description: C++17 source, tối đa 256 KiB.
+                  description: Source của một ngôn ngữ được hỗ trợ, tối đa 256 KiB.
+                language:
+                  type: string
+                  enum: [cpp17, c17, rust2021, go, java17]
+                  default: cpp17
       responses:
         '202':
           description: Version queued for compile

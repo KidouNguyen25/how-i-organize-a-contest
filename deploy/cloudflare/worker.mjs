@@ -1,6 +1,7 @@
 // Private origin proxy. Submission code never runs in this Worker.
 const BODY_LIMIT = 1024 * 1024;
 const ID = "[0-9a-f-]{36}";
+const TEXT_RESPONSE = new RegExp(`^/api/v1/(bot-template|bots/${ID}/source)$`);
 const ROUTES = [
   ["POST", /^\/api\/v1\/auth\/(login|logout|register)$/],
   ["GET", /^\/api\/v1\/(me|stats|live|bot-template|tournaments|ops\/status)$/],
@@ -79,6 +80,9 @@ export default {
       return failure(503, "GATEWAY_NOT_CONFIGURED", "Gateway configuration is incomplete.");
     }
     const mutation = !["GET", "HEAD"].includes(request.method);
+    if (mutation && request.headers.get("Sec-Fetch-Site") === "cross-site") {
+      return failure(403, "FORBIDDEN", "Cross-site mutation rejected.");
+    }
     if (mutation && request.headers.get("Origin") !== env.PUBLIC_ORIGIN) {
       return failure(403, "FORBIDDEN", "Public origin does not match.");
     }
@@ -96,7 +100,7 @@ export default {
     }
     // Construct a fresh header set. Client-supplied proxy identity is discarded.
     const headers = new Headers();
-    for (const name of ["Cookie", "X-CSRF-Token", "Content-Type"]) {
+    for (const name of ["Cookie", "X-CSRF-Token", "Content-Type", "Sec-Fetch-Site"]) {
       const value = request.headers.get(name);
       if (value !== null) headers.set(name, value);
     }
@@ -109,8 +113,16 @@ export default {
         redirect: "manual", signal: AbortSignal.timeout(90_000),
         cf: { cacheTtl: 0, cacheEverything: false } });
       if (response.status >= 300 && response.status < 400) {
-        await response.body?.cancel();
+        await response.body?.cancel().catch(() => {});
         return failure(502, "ORIGIN_REDIRECT", "Origin returned an unexpected redirect.");
+      }
+      const mediaType = (response.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+      const isJson = mediaType === "application/json" || (mediaType.startsWith("application/") && mediaType.endsWith("+json"));
+      const isText = request.method === "GET" && response.ok && TEXT_RESPONSE.test(url.pathname) && mediaType === "text/plain";
+      if (response.status !== 204 && !isJson && !isText) {
+        await response.body?.cancel().catch(() => {});
+        const unavailable = response.status >= 500;
+        return failure(unavailable ? 503 : 502, unavailable ? "ORIGIN_UNAVAILABLE" : "BAD_ORIGIN_RESPONSE", "Origin returned an unexpected response.");
       }
       const outgoing = new Headers(response.headers);
       for (const name of ["Connection", "Transfer-Encoding", "Keep-Alive", "Server", "Location",
