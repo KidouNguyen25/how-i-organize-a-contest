@@ -798,7 +798,7 @@ class App:
                     for round_no, entry_id in enumerate(entry_ids, start=1)
                 ] if total else []
             elif entry_count % 2:
-                bye_rows = byes(entry_ids, app.store.list_match_summaries(tid))
+                bye_rows = byes(entry_ids, app.store.list_match_bye_inputs(tid))
             else:
                 bye_rows = []
             return 200, {

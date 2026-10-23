@@ -931,6 +931,14 @@ class Store:
             rows = con.execute(sql, args).fetchall()
         return [dict(row) for row in rows]
 
+    def list_match_bye_inputs(self, tid: str) -> list[sqlite3.Row]:
+        """Read only participants and round fields needed to compute byes."""
+        with self.tx() as con:
+            return con.execute(
+                "SELECT leg_no,round_no,white_entry_id,black_entry_id FROM matches WHERE tournament_id=?",
+                (tid,),
+            ).fetchall()
+
     def list_match_summary_page(self, tid: str, limit: int, *,
                                 cursor: tuple[int, int, int, str] | None = None,
                                 direction: str = "after") -> tuple[list[dict[str, Any]], bool]:
