@@ -12,3 +12,5 @@ Route (hash): `#/` màn chính, `#/tournaments`, `#/tournament/:id`, `#/code/:id
 Phím tắt trang ván: ←/→/↑/↓ duyệt nước, `f` xoay bàn.
 
 Logo: Tabler Icons "chess-knight" (MIT), `assets/knight-tabler-MIT.svg`. Quân Kéo/Búa/Bao/Vua là SVG tự vẽ; không dùng asset Lichess. Ảnh chụp màn hình ở `screenshots/`.
+
+Giao diện & hiệu ứng: `themes.css` + `themes.js` (nạp sau `styles.css`, không sửa `app.js`). Nút 🎨 trên header (hoặc “Giao diện” ở thanh dưới trên điện thoại) mở bảng chọn nền giao diện, màu nhấn, 11 theme bàn cờ, 5 bộ quân, kiểu tô nước đi cuối, hiệu ứng di chuyển/ăn quân, pháo giấy, âm thanh. Lựa chọn lưu trong `localStorage` (`ott.prefs.v1`). Phím tắt thêm ở trang ván: `Space` tự phát lại, `Home`/`End`, `B` đổi theme bàn cờ.
