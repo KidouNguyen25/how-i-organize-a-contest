@@ -43,7 +43,7 @@ await check('W07', 'Header danh tính do client giả không có tác dụng', a
   ok([200, 401].includes(r.status), `status=${r.status}`);
 });
 await check('W08', 'Bundle web không chứa origin key hay URL tunnel', async () => {
-  for (const f of ['/', '/app.js', '/net.js', '/runtime-config.js', '/styles.css']) {
+  for (const f of ['/', '/app.js', '/themes.js', '/net.js', '/runtime-config.js', '/styles.css', '/themes.css']) {
     const t = await (await fetch(PORTAL + f)).text();
     ok(!/trycloudflare\.com/i.test(t), `${f} chứa trycloudflare`); if (KEY) ok(!t.includes(KEY), `${f} chứa origin key`);
   }

@@ -36,7 +36,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           python -I -c "from core.api_v2 import CoreAPIv2Controller; from core.adapters import BotAdapter, TestSuiteAdapter; from judge.server import JudgeService; from ott.api import make_app"
-          python -I -c "from pathlib import Path; from ott.api import TEMPLATE_PATH; from ott.__main__ import WEB_ROOT, DOCKER_CONTEXT, ROOT; assert all((WEB_ROOT / name).is_file() for name in ('index.html','styles.css','app.js','net.js','runtime-config.js','assets/knight-tabler-MIT.svg')); assert all(TEMPLATE_PATH.with_name('bot_template' + ext).is_file() for ext in ('.cpp','.c','.rs','.go')); assert (DOCKER_CONTEXT / 'Dockerfile.bot').is_file(); assert ROOT == Path.cwd()"
+          python -I -c "from pathlib import Path; from ott.api import TEMPLATE_PATH; from ott.__main__ import WEB_ROOT, DOCKER_CONTEXT, ROOT; assert all((WEB_ROOT / name).is_file() for name in ('index.html','styles.css','themes.css','app.js','themes.js','net.js','runtime-config.js','assets/knight-tabler-MIT.svg')); assert all(TEMPLATE_PATH.with_name('bot_template' + ext).is_file() for ext in ('.cpp','.c','.rs','.go')); assert (DOCKER_CONTEXT / 'Dockerfile.bot').is_file(); assert ROOT == Path.cwd()"
           contest --help
           oj-server --help
           oj-client --help
