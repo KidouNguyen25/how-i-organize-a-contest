@@ -19,7 +19,7 @@ include = ["core", "core.*", "judge", "judge.*", "mockup", "ott", "ott.*", "samp
 namespaces = false
 
 [tool.setuptools.package-data]
-mockup = ["index.html", "styles.css", "app.js", "net.js", "runtime-config.js", "_headers", "assets/*.svg"]
+mockup = ["index.html", "styles.css", "themes.css", "themes.js", "app.js", "net.js", "runtime-config.js", "_headers", "assets/*.svg"]
 "ott.docker" = ["Dockerfile.bot"]
 samples = ["bot_template.cpp", "bot_template.c", "bot_template.rs", "bot_template.go", "bot_template.java"]
 
