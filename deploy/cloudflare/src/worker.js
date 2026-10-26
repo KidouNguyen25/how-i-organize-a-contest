@@ -47,19 +47,24 @@ async function readBodyLimited(request, limit) {
   if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > limit)) return { tooLarge: true };
   if (!request.body) return { bytes: null };
   const reader = request.body.getReader();
-  const chunks = [];
+  const initialSize = declared === null ? 4 * 1024 : Math.min(Math.max(Number(declared), 1024), 16 * 1024);
+  let bytes = new Uint8Array(Math.min(limit, initialSize));
   let total = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    total += value.byteLength;
-    if (total > limit) { await reader.cancel().catch(() => {}); return { tooLarge: true }; }
-    chunks.push(value);
+    const nextTotal = total + value.byteLength;
+    if (nextTotal > limit) { await reader.cancel().catch(() => {}); return { tooLarge: true }; }
+    if (nextTotal > bytes.length) {
+      const capacity = Math.min(limit, Math.max(nextTotal, bytes.length * 2, 16 * 1024));
+      const expanded = new Uint8Array(capacity);
+      expanded.set(bytes.subarray(0, total));
+      bytes = expanded;
+    }
+    bytes.set(value, total);
+    total = nextTotal;
   }
-  const bytes = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) { bytes.set(c, off); off += c.byteLength; }
-  return { bytes };
+  return { bytes: bytes.subarray(0, total) };
 }
 
 function stripCookieDomain(value) {
@@ -81,7 +86,14 @@ async function handleApi(request, env, url, requestId) {
 
   let origin;
   try { origin = new URL(env.ORIGIN_URL); } catch { origin = null; }
-  if (!origin || !env.ORIGIN_KEY || !/^https?:$/.test(origin.protocol)) return json(503, 'ORIGIN_NOT_CONFIGURED', 'Origin is not configured.', requestId, { 'Retry-After': '30' });
+  const localHttpOrigin = origin?.protocol === 'http:'
+    && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname);
+  const quickTunnelOrigin = origin?.protocol === 'https:'
+    && /^[a-z0-9-]+\.trycloudflare\.com$/.test(origin.hostname);
+  if (!origin || !env.ORIGIN_KEY || (!quickTunnelOrigin && !localHttpOrigin)
+      || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) {
+    return json(503, 'ORIGIN_NOT_CONFIGURED', 'Origin is not configured.', requestId, { 'Retry-After': '30' });
+  }
 
   const mutating = method !== 'GET';
   if (mutating) {
