@@ -1,3 +1,4 @@
+import json
 import queue
 import shutil
 import tempfile
@@ -8,7 +9,7 @@ from unittest import mock
 from ott import runner
 from ott.sandbox import DockerSandbox, InfraError, LocalSandbox, make_sandbox
 
-DOCKER = DockerSandbox()
+DOCKER = DockerSandbox(runtime_image="ott-bot-runtime")
 DOCKER_OK, DOCKER_WHY = DOCKER.available()
 
 ECHO = r'''#include <iostream>
@@ -96,11 +97,27 @@ class DockerSandboxIntegrationTests(unittest.TestCase):
         runner.set_sandbox(LocalSandbox())
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def build(self, name: str, source: str) -> Path:
+    def build(self, name: str, source: str, language: str = "cpp17") -> Path:
         out = self.tmp / name / "bot"
-        ok, msg = DOCKER.compile(out, source)
+        ok, msg = DOCKER.compile(out, source, language)
         self.assertTrue(ok, msg)
         return out
+
+    def test_c17_and_rust2021_templates_interactive_protocol(self):
+        observation = {"legal_actions": [{"type": "move", "from": "e4", "to": "e5"}]}
+        root = Path(__file__).resolve().parents[1]
+        self.assertNotEqual(DOCKER.compiler_image_id, DOCKER.runtime_image_id)
+        for language, extension in (("c17", "c"), ("rust2021", "rs")):
+            with self.subTest(language=language):
+                source = (root / "samples" / ("bot_template." + extension)).read_text(encoding="utf-8")
+                bot = runner.BotProcess(self.build(language, source, language), language)
+                try:
+                    bot.wait_ready()
+                    for _ in range(3):
+                        bot.send(json.dumps(observation))
+                        self.assertEqual(json.loads(read_line(bot)), observation["legal_actions"][0])
+                finally:
+                    bot.kill()
 
     def probe(self, name: str, timeout: float = 30.0):
         bot = runner.BotProcess(self.build(name, PROBES[name]), name)

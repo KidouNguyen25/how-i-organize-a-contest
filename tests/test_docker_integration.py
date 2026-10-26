@@ -9,6 +9,7 @@ from judge.problems import Problem, TestCase
 
 
 IMAGE = "lan-judge-cpp17"
+RUNTIME_IMAGE = "lan-judge-runtime"
 DOCKER = shutil.which("docker")
 
 
@@ -17,7 +18,7 @@ def _image_ready():
         return False
     try:
         return subprocess.run(
-            [DOCKER, "image", "inspect", IMAGE],
+            [DOCKER, "image", "inspect", IMAGE, RUNTIME_IMAGE],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,
@@ -50,7 +51,7 @@ class SandboxCommandTests(unittest.TestCase):
 
 @unittest.skipUnless(IMAGE_READY, "Linux Docker daemon and runner image are required")
 class DockerJudgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def _judge(self, source, tests, time_limit_ms=2000, memory_limit_mb=256):
+    async def _judge(self, source, tests, time_limit_ms=2000, memory_limit_mb=256, language="cpp17"):
         problem = Problem(
             id="fixture",
             title="Fixture",
@@ -62,7 +63,21 @@ class DockerJudgeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             compile_timeout_sec=15,
             tests=tuple(tests),
         )
-        return await DockerJudge(IMAGE).judge(problem, source)
+        return await DockerJudge(IMAGE, RUNTIME_IMAGE).judge(problem, source, language)
+
+    async def test_c17_and_rust2021_verdicts_use_separate_runtime(self):
+        sources = {
+            "c17": '#include <stdio.h>\nint main(void){int n;if(scanf("%d", &n)!=1)return 1;printf("%d\\n",n);}',
+            "rust2021": 'use std::io::{self,Read}; fn main(){let mut s=String::new();io::stdin().read_to_string(&mut s).unwrap();let n:i32=s.trim().parse().unwrap();println!("{}",n);}',
+        }
+        for language, source in sources.items():
+            with self.subTest(language=language):
+                accepted = await self._judge(source, [TestCase("37\n", "37\n", 100)], language=language)
+                self.assertEqual((accepted["verdict"], accepted["score"]), ("AC", 100))
+                wrong = await self._judge(source, [TestCase("37\n", "38\n", 100)], language=language)
+                self.assertEqual((wrong["verdict"], wrong["score"]), ("WA", 0))
+                error = await self._judge("invalid source !", [TestCase("", "", 100)], language=language)
+                self.assertEqual(error["verdict"], "CE")
 
     async def test_cpp17_verdicts_and_partial_points(self):
         cases = [TestCase("1\n", "1\n", 40), TestCase("2\n", "2\n", 60)]

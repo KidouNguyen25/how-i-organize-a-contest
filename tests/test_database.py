@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from judge.database import Database
+from ott.store import Store, _DUMMY_PASSWORD_HASH
 
 
 class DatabaseTests(unittest.TestCase):
@@ -41,6 +43,16 @@ class DatabaseTests(unittest.TestCase):
         restarted = Database(self.database_path)
         self.assertEqual(restarted.get_submission(owner, submission_id)["status"], "QUEUED")
         self.assertEqual(restarted.claim_next_submission()["id"], submission_id)
+
+
+class StoreAuthTests(unittest.TestCase):
+    def test_unknown_username_reuses_warmed_dummy_password_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "ott.sqlite3")
+            with patch("ott.store._hash_password", side_effect=AssertionError("must not hash per login")):
+                with patch("ott.store._verify_password", return_value=False) as verify:
+                    self.assertIsNone(store.verify_login("missing", "wrong password"))
+            verify.assert_called_once_with("wrong password", _DUMMY_PASSWORD_HASH)
 
 
 if __name__ == "__main__":

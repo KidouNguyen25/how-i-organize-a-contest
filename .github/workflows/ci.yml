@@ -30,6 +30,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install distribution
+        run: python -m pip install --no-deps .
+      - name: Check installed modules and entry points
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -I -c "from core.api_v2 import CoreAPIv2Controller; from core.adapters import BotAdapter, TestSuiteAdapter; from judge.server import JudgeService; from ott.api import make_app"
+          python -I -c "from pathlib import Path; from ott.api import TEMPLATE_PATH; from ott.__main__ import WEB_ROOT, DOCKER_CONTEXT, ROOT; assert all((WEB_ROOT / name).is_file() for name in ('index.html','styles.css','app.js','net.js','runtime-config.js','assets/knight-tabler-MIT.svg')); assert all(TEMPLATE_PATH.with_name('bot_template' + ext).is_file() for ext in ('.cpp','.c','.rs','.go')); assert (DOCKER_CONTEXT / 'Dockerfile.bot').is_file(); assert ROOT == Path.cwd()"
+          contest --help
+          oj-server --help
+          oj-client --help
       - name: Compile Python modules
         run: python -m compileall -q core judge ott tests
       - name: Run Python test suite
@@ -46,10 +56,28 @@ jobs:
           python-version: "3.11"
       - name: Build judge runner image
         run: docker build -f judge/Dockerfile.runner -t lan-judge-cpp17 .
+      - name: Build judge runtime image
+        run: docker build -f judge/Dockerfile.runner --target runtime -t lan-judge-runtime .
       - name: Build OTT compiler image
         run: python -m ott build-image --image ott-bot-runner
       - name: Build OTT runtime image
-        run: python -m ott build-image --target runtime --image contest-bot-runtime
+        run: python -m ott build-image --target runtime --image ott-bot-runtime
+      - name: Require separate Linux compiler and runtime images
+        run: |
+          python - <<'PY'
+          import asyncio
+          from judge.judge_engine import DockerJudge
+          from ott.sandbox import DockerSandbox
+
+          sandbox = DockerSandbox(runtime_image="ott-bot-runtime")
+          available, detail = sandbox.available()
+          if not available or sandbox.compiler_image_id == sandbox.runtime_image_id:
+              raise RuntimeError("OTT Docker integration prerequisites failed: " + detail)
+          judge = DockerJudge("lan-judge-cpp17", "lan-judge-runtime")
+          asyncio.run(judge.check_available())
+          if judge.compiler_image_id == judge.runtime_image_id:
+              raise RuntimeError("Judge compiler and runtime must use different images.")
+          PY
       - name: Test Docker judge integration
         run: python -m unittest discover -s tests -p "test_docker_integration.py" -v
       - name: Test Docker sandbox integration
