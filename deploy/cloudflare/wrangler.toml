@@ -1,8 +1,13 @@
 # Demo 0đ: static assets + BFF. Triển khai: xem docs/minh/runbook-demo.md
 name = "ott-arena-demo"
 main = "src/worker.js"
-compatibility_date = "2026-10-01"
+compatibility_date = "2026-10-26"
 workers_dev = true
+preview_urls = false
+
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 [assets]
 directory = "../../mockup"
@@ -15,7 +20,8 @@ run_worker_first = ["/api/*", "/runtime-config.js"]
 RUNTIME_MODE = "tunnel"
 POLL_MS = "10000"
 # PUBLIC_ORIGIN: URL công khai của Worker, ví dụ https://ott-arena-demo.<subdomain>.workers.dev (đặt sau lần deploy đầu)
-PUBLIC_ORIGIN = ""
+PUBLIC_ORIGIN = "https://ott-arena-demo.nductoan1548-ord-950.workers.dev"
 # ORIGIN_URL: URL Quick Tunnel hiện tại; đổi mỗi lần tạo lại tunnel (xem scripts/set-origin.sh)
-ORIGIN_URL = ""
+ORIGIN_URL = "https://unlikely-clinics-ultimate-glossary.trycloudflare.com"
 # ORIGIN_KEY là secret: wrangler secret put ORIGIN_KEY (không ghi vào file này)
+
