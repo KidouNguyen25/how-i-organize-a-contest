@@ -50,16 +50,17 @@ class LanguageTests(unittest.TestCase):
                                              self.received_at, language=language)
 
     def test_profiles_and_cache_keys_are_fixed_and_distinct(self):
-        self.assertEqual(set(LANGUAGES), {"cpp17", "c17", "rust2021", "go"})
+        self.assertEqual(set(LANGUAGES), {"cpp17", "c17", "rust2021", "go", "java17"})
         self.assertEqual(build_key(DIGEST), DIGEST)
-        self.assertEqual(len({build_key(DIGEST, item) for item in LANGUAGES}), 4)
+        self.assertEqual(len({build_key(DIGEST, item) for item in LANGUAGES}), 5)
         for invalid in (None, [], {}, "python", "c17; id", "../../bot.c"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 language_profile(invalid)
         for profile in LANGUAGES.values():
             command = profile.command("/src/" + profile.filename, "/build/bot")
             self.assertEqual(command[0], profile.compiler)
-            self.assertEqual(command[-3:], ["-o", "/build/bot", "/src/" + profile.filename])
+            output_flag = "-d" if profile.artifact_format == "jar" else "-o"
+            self.assertEqual(command[-3:], [output_flag, "/build/bot", "/src/" + profile.filename])
 
     def test_version_two_database_migrates_language_columns_and_preserves_sources(self):
         self.store.save_draft(self.eid, SOURCE)
@@ -67,6 +68,10 @@ class LanguageTests(unittest.TestCase):
         with self.store.tx() as con:
             con.execute("ALTER TABLE entries DROP COLUMN draft_language")
             con.execute("ALTER TABLE submission_receipts DROP COLUMN language")
+            con.execute("DROP INDEX users_email_idx")
+            con.execute("DROP TABLE email_verification_tokens")
+            con.execute("ALTER TABLE users DROP COLUMN email_verified_at")
+            con.execute("ALTER TABLE users DROP COLUMN email")
             con.execute("PRAGMA user_version = 2")
         migrated = Store(self.root / "ott.db")
         self.assertEqual(migrated.get_draft(self.eid, with_language=True), (SOURCE, int(self.received_at), "cpp17"))

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from ott import engine
+from ott.runner import MatchRunner
 from ott.store import MAX_ATTEMPTS, Lease, LeaseLost, Store, StoreError
 from ott.tournament import Dispatcher, round_robin
 
@@ -43,6 +44,32 @@ class DispatchTests(unittest.TestCase):
         self.store.create_matches(tid, round_robin(ids), 300000)
         self.store.update_tournament(tid, status=status)
         return tid, self.store.list_matches(tid, limit=2000)
+
+    def test_match_runner_passes_each_bot_language_to_runtime(self):
+        class StopPlay(Exception):
+            pass
+
+        class Adapter:
+            def actor(self, state):
+                raise StopPlay
+
+        match_runner = object.__new__(MatchRunner)
+        match_runner.adapter = Adapter()
+        match_runner._check_control = lambda: None
+        launched = []
+
+        def bot(exe, side, language):
+            launched.append((side, language))
+            instance = MagicMock()
+            instance.wait_ready.return_value = None
+            return instance
+
+        with patch("ott.runner.BotProcess", side_effect=bot):
+            with self.assertRaises(StopPlay):
+                match_runner._play({"last_event_seq": 0}, {"white": Path("w"), "black": Path("b")},
+                                   {}, {}, {"white": 300000, "black": 300000},
+                                   {"white": "cpp17", "black": "java17"})
+        self.assertEqual(launched, [("white", "cpp17"), ("black", "java17")])
 
     def test_claim_finds_running_tournament_beyond_blocked_prefix(self):
         blocked_tid, _ = self.tournament("LOCKED", players=34)
@@ -153,6 +180,10 @@ class DispatchTests(unittest.TestCase):
             con.execute("UPDATE match_events SET state_after_json=?,state_after_zlib=NULL WHERE match_id=? AND sequence_no=1",
                         (serialized, match_id))
             con.execute("ALTER TABLE match_events DROP COLUMN state_after_zlib")
+            con.execute("DROP INDEX users_email_idx")
+            con.execute("DROP TABLE email_verification_tokens")
+            con.execute("ALTER TABLE users DROP COLUMN email_verified_at")
+            con.execute("ALTER TABLE users DROP COLUMN email")
             con.execute("PRAGMA user_version=3")
 
         migrated = Store(self.store.path)

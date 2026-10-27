@@ -49,6 +49,27 @@ def expect(cond: bool, msg: str) -> None:
         sys.exit(1)
 
 
+def wait_for_submission(client: Client, tid: str) -> dict | None:
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        status, data = client.call("GET", f"/tournaments/{tid}/code")
+        if status != 200:
+            return None
+        pending = data.get("pending_submission") or {}
+        if data.get("submitted") or data.get("submit_note") or pending.get("status") == "REVIEW":
+            return data
+        time.sleep(0.25)
+    return None
+
+
+def submit_and_wait(client: Client, tid: str, source: str, name: str) -> str:
+    status, data = client.call("POST", f"/tournaments/{tid}/code/submit", {"source": source, "confirm": True})
+    expect(status in (200, 202) and data.get("accepted"), f"{name} final submission accepted")
+    result = wait_for_submission(client, tid)
+    expect(result is not None and result.get("submitted"), f"{name} final code compiled and locked")
+    return data["receipt_id"]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8080)
@@ -100,9 +121,11 @@ def main() -> None:
     st, d = alpha.call("POST", f"/tournaments/{tid}/code/check", {"source": "this is not c++"})
     expect(st == 200 and d["ok"] is False and d["compile_used"] == 1, "compile check reports error and uses 1 attempt")
     st, d = alpha.call("POST", f"/tournaments/{tid}/code/submit", {"source": "this is not c++", "confirm": True})
-    expect(st == 422 and d["error"]["code"] == "COMPILE_ERROR", "submit refused when code does not compile")
-    st, d = alpha.call("GET", f"/tournaments/{tid}/code")
-    expect(d["compile_used"] == 2 and not d["submitted"], "failed submit consumed an attempt, still not submitted")
+    expect(st == 202 and d["accepted"], "invalid final source accepted for queued compilation")
+    failed = wait_for_submission(alpha, tid)
+    expect(failed is not None and failed.get("submit_note") and not failed["submitted"],
+           "invalid final source fails asynchronously")
+    expect(failed["compile_used"] == 2, "failed submit consumed an attempt")
 
     sources = {n: (ROOT / "samples" / "bots" / f"{b}.cpp").read_text(encoding="utf-8") for n, b in BOTS.items()}
     time.sleep(3.1)
@@ -125,23 +148,25 @@ def main() -> None:
     expect(st == 429 and d["error"]["code"] == "COMPILE_LIMIT", "11th compile attempt rejected (limit 10)")
     st, d = beta.call("POST", f"/tournaments/{tid}/code/submit", {"source": sources["team_beta"] + "\n// edited\n", "confirm": True})
     expect(st == 429, "after the limit, edited source cannot be submitted")
-    st, d = beta.call("POST", f"/tournaments/{tid}/code/submit", {"source": sources["team_beta"], "confirm": True})
-    expect(st == 201, "after the limit, the last successfully compiled source can still be submitted")
+    submit_and_wait(beta, tid, sources["team_beta"], "beta")
 
     skip = "team_delta" if args.auto_submit else None
+    alpha_receipt = None
     for name in ("team_alpha", "team_gamma", "team_delta"):
         c = teams[name]
         if name == skip:
             st, _ = c.call("PUT", f"/tournaments/{tid}/code", {"source": sources[name]})
             expect(st == 200, f"{name} saved a draft but will NOT submit")
             continue
-        st, d = c.call("POST", f"/tournaments/{tid}/code/submit", {"source": sources[name], "confirm": True})
-        expect(st == 201, f"{name} submitted")
+        receipt_id = submit_and_wait(c, tid, sources[name], name)
+        if name == "team_alpha":
+            alpha_receipt = receipt_id
 
     st, d = alpha.call("PUT", f"/tournaments/{tid}/code", {"source": "// tamper"})
     expect(st == 409 and d["error"]["code"] == "ALREADY_SUBMITTED", "code cannot change after submission")
     st, d = alpha.call("POST", f"/tournaments/{tid}/code/submit", {"source": sources["team_alpha"], "confirm": True})
-    expect(st == 409, "cannot submit twice")
+    expect(st == 200 and d["accepted"] and d["receipt_id"] == alpha_receipt,
+           "repeated final submit returns the same immutable receipt")
     st, d = alpha.call("GET", f"/tournaments/{tid}/code")
     expect(d["submitted"] and not d["editable"] and d["source"] == sources["team_alpha"], "submitted code is read-only and unchanged")
     st, d = org.call("GET", f"/tournaments/{tid}/entries")

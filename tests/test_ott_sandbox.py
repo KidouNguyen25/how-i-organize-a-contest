@@ -1,6 +1,8 @@
 import json
+import os
 import queue
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,6 +61,30 @@ def read_line(bot: runner.BotProcess, timeout: float = 20.0):
 
 
 class SandboxUnitTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX directory modes are not enforced on Windows")
+    def test_compile_source_directory_is_readable_with_restrictive_umask(self):
+        sandbox = DockerSandbox("img")
+        sandbox.compiler_image_id = "sha256:" + "a" * 64
+        observed_modes = []
+
+        def inspect_mount(args, **kwargs):
+            mount = next(arg for arg in args if arg.startswith("type=bind,src="))
+            source_dir = mount.split("src=", 1)[1].split(",dst=", 1)[0]
+            observed_modes.append(stat.S_IMODE(Path(source_dir).stat().st_mode))
+            return 1, "compile failed", None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            previous_umask = os.umask(0o077)
+            try:
+                with mock.patch.object(sandbox, "_ensure_images"), \
+                     mock.patch("ott.sandbox._bounded_process", side_effect=inspect_mount):
+                    ok, _ = sandbox.compile(Path(tmp) / "bot", "int main() { return 0; }\n")
+            finally:
+                os.umask(previous_umask)
+
+        self.assertFalse(ok)
+        self.assertEqual(observed_modes, [0o755])
+
     def test_docker_flags_isolate_bots(self):
         sandbox = DockerSandbox("img")
         sandbox.runtime_image_id = "img"

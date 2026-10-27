@@ -547,6 +547,7 @@ class DockerSandbox(_ArtifactPolicy):
         with tempfile.TemporaryDirectory(prefix="ott-cc-") as tmp:
             src_dir, built = Path(tmp) / "src", Path(tmp) / "bot"
             src_dir.mkdir(mode=0o755)
+            os.chmod(src_dir, 0o755)
             src = src_dir / profile.filename
             src.write_bytes(source.encode("utf-8"))
             os.chmod(src, 0o444)

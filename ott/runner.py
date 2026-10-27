@@ -299,7 +299,7 @@ class MatchRunner:
             })
             state = self.adapter.initial_state()
             clocks = {"white":match["white_clock_ms"],"black":match["black_clock_ms"]}
-            outcome = self._play(match,exes,bots,state,clocks)
+            outcome = self._play(match,exes,bots,state,clocks,languages)
             self._check_control()
             self.store.finish_match(self.mid,outcome["result"],outcome["reason"],clocks,lease=self.lease)
         except LeaseLost:
@@ -329,7 +329,7 @@ class MatchRunner:
         return self.adapter.loss(side,reason)
 
     def _play(self, match: dict[str, Any], exes: dict[str, Path], bots: dict[str, BotProcess],
-              state: dict[str, Any], clocks: dict[str, int]) -> dict[str, str]:
+              state: dict[str, Any], clocks: dict[str, int], languages: dict[str, str]) -> dict[str, str]:
         for side in ("white","black"):
             self._check_control()
             try:
