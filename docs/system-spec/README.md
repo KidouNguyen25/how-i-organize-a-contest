@@ -1,7 +1,5 @@
 # Hồ sơ đặc tả hệ thống LapTrinhThiDau
 
-Cập nhật: 27/10/2026
-
 Phạm vi: checkout `origin/main` tại thời điểm lập hồ sơ. Tài liệu mô tả mã nguồn và phân biệt chức năng đã có với phần mới ở mức thiết kế hoặc chưa nghiệm thu.
 
 ## Bộ tài liệu

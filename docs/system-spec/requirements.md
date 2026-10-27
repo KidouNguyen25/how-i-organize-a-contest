@@ -1,7 +1,6 @@
 # Đặc tả yêu cầu hệ thống
 
 Phiên bản: 1.0
-Ngày: 27/10/2026
 
 Đối tượng đọc: chủ dự án, ban tổ chức, người phát triển và người vận hành.
 

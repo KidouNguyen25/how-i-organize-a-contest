@@ -1,7 +1,6 @@
 # Kiến trúc và hợp đồng kỹ thuật
 
 Phiên bản: 1.0
-Ngày: 27/10/2026
 
 Phạm vi: kiến trúc có trong mã nguồn tại `origin/main`; các ranh giới thiết kế và thiếu hụt tích hợp được nêu rõ.
 

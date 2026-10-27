@@ -1,7 +1,6 @@
 # Bảo mật, vận hành và nghiệm thu
 
 Phiên bản: 1.0
-Ngày: 27/10/2026
 
 Đối tượng: người vận hành và người duyệt release.
 
@@ -66,7 +65,7 @@ Khi deploy image mới, xử lý receipt đang chờ, backup DB/artifact, build 
 
 ## 5. Cổng nghiệm thu còn mở
 
-Theo `docs/release-acceptance.md` (cập nhật 23/10/2026):
+Theo `docs/release-acceptance.md`:
 
 | Cổng | Trạng thái hồ sơ | Bằng chứng còn cần |
 |---|---|---|
