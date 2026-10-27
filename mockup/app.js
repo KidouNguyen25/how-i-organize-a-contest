@@ -782,11 +782,17 @@ async function pageUser(name) {
 function pageAuth(mode) {
   const reg = mode === 'register';
   return `<div class="page"><section class="box login-box"><div class="box__top"><h1>${reg ? 'Đăng ký' : 'Đăng nhập'}</h1></div><form class="box-pad" data-form="${mode}">
-    <div class="form-group"><label for="u">Tên đăng nhập</label><input id="u" class="form-control" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_]+"></div>
+    <div class="form-group"><label for="u">${reg ? 'Tên đăng nhập' : 'Tên đăng nhập hoặc email'}</label><input id="u" class="form-control" autocomplete="username" required minlength="${reg ? 3 : 1}" maxlength="${reg ? 32 : 254}" ${reg ? 'pattern="[A-Za-z0-9_]+"' : ''}></div>
+    ${reg ? '<div class="form-group"><label for="email">Email</label><input id="email" type="email" class="form-control" autocomplete="email" required maxlength="254"></div>' : ''}
     <div class="form-group"><label for="p">Mật khẩu</label><input id="p" type="password" class="form-control" autocomplete="${reg ? 'new-password' : 'current-password'}" required minlength="${reg ? 10 : 1}" maxlength="128">${reg ? '<div class="form-help">Tối thiểu 10 ký tự.</div>' : ''}</div>
-    <div id="auth-err" class="form-help" style="color:#e57373;min-height:1.2rem"></div>
+    <div id="auth-err" class="form-help" aria-live="polite" style="color:#e57373;min-height:1.2rem"></div>
     <button class="button green big" style="width:100%" type="submit">${reg ? 'Tạo tài khoản' : 'Đăng nhập'}</button>
+    ${reg ? '<p class="form-help">Cần xác minh email trước khi đăng nhập.</p>' : ''}
     <p class="form-help" style="text-align:center;margin-top:1rem">${reg ? 'Đã có tài khoản? <a href="#/login">Đăng nhập</a>' : 'Chưa có tài khoản? <a href="#/register">Đăng ký</a>'}</p></form></section></div>`;
+}
+function pageVerify(token) {
+  if (!token || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) return errorHTML('Liên kết xác minh không hợp lệ.');
+  return `<div class="page"><section class="box login-box"><div class="box__top"><h1>Xác minh email</h1></div><div class="box-pad"><p>Chọn xác minh để kích hoạt tài khoản.</p><button class="button green big" data-act="verify-email" data-token="${esc(token)}">Xác minh email</button><p class="form-help"><a href="#/login">Đăng nhập</a></p></div></section></div>`;
 }
 function pageRules() {
   return `<div class="page"><section class="box box-pad" style="max-width:56rem;margin:auto"><h1 style="font-size:1.8rem;margin-bottom:1rem">Luật OTT v1</h1>
@@ -933,6 +939,7 @@ async function route(soft = false) {
       case 'bot': html = await pageBot(); break;
       case 'user': html = await pageUser(seg[1]); break;
       case 'login': case 'register': html = pageAuth(key); break;
+      case 'verify': html = pageVerify(seg[1]); break;
       case 'rules': html = pageRules(); break;
       case 'organizer': html = seg[1] === 'new' ? pageOrgNew() : seg[1] === 'manage' ? await pageOrgManage(seg[2], q) : await pageOrgList(); break;
       default: html = await pageHome();
@@ -970,6 +977,7 @@ document.addEventListener('click', (e) => {
   const tid = act.dataset.tid;
   switch (act.dataset.act) {
     case 'logout': e.preventDefault(); run(async () => { await api('POST', '/auth/logout'); S.me = null; S.csrf = null; location.hash = '#/login'; await route(); }); break;
+    case 'verify-email': run(async () => { await api('POST', '/auth/verify-email', { token: act.dataset.token }); location.hash = '#/login'; await route(); }, 'Email đã xác minh. Đăng nhập để tiếp tục.'); break;
     case 'register': run(async () => { await api('POST', `/tournaments/${tid}/entry`); route(true); }, 'Đã đăng ký suất dự thi'); break;
     case 'lifecycle': {
       const op = act.dataset.op;
@@ -992,9 +1000,15 @@ document.addEventListener('submit', async (e) => {
   const kind = form.dataset.form;
   if (kind === 'login' || kind === 'register') {
     const username = $('#u').value.trim(), password = $('#p').value, err = $('#auth-err');
+    err.style.color = '#e57373';
     err.textContent = '';
     try {
-      if (kind === 'register') await api('POST', '/auth/register', { username, password });
+      if (kind === 'register') {
+        await api('POST', '/auth/register', { username, email: $('#email').value.trim(), password });
+        err.style.color = '#64c78a';
+        err.textContent = 'Đã gửi email xác minh. Mở hộp thư để kích hoạt tài khoản.';
+        return;
+      }
       const r = await api('POST', '/auth/login', { username, password });
       S.csrf = r.csrf_token; S.me = r.user;
       location.hash = '#/'; await route();

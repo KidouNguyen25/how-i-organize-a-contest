@@ -4,11 +4,12 @@ Các lệnh dưới đây dành cho người vận hành. Thêm file cấu hình
 
 ## Phạm vi hiện tại
 
-- SQLite schema 4 có migration từ schema 1/2/3, ngôn ngữ bản nháp/receipt, lease, fencing, attempt và khóa tài nguyên dùng chung.
+- SQLite schema 5 có migration từ schema 1/2/3/4, xác minh email đăng ký, ngôn ngữ bản nháp/receipt, lease, fencing, attempt và khóa tài nguyên dùng chung.
 - OTT đi qua registry adapter. Transport và schema trận vẫn dùng hai bên white/black; chưa thay thế contract đa loại giải của phần A05.
 - Source cuối được lưu bền vững trước biên dịch, trả HTTP 202 và giữ thời điểm nhận. Theo dõi `GET /api/v1/tournaments/{id}/code`, trường `pending_submission`.
 - API và match dispatcher có thể chạy riêng trên cùng Linux VM. Compiler vẫn được gọi từ API; `--no-dispatch` không tạo ranh giới cách ly compiler khỏi API.
 - Demo Internet chỉ cho source nằm trong allowlist. Chưa đủ điều kiện nhận code bất kỳ từ Internet.
+- Public signup bật riêng bằng `--allow-public-registration`; email phải được xác minh trước login. Worker gửi xác minh qua Gmail SMTP TLS port 465; đặt `GMAIL_ADDRESS` và `GMAIL_APP_PASSWORD` bằng `wrangler secret put`. VM giữ egress firewall đóng cho SMTP.
 
 ## Chuẩn bị và chạy local
 

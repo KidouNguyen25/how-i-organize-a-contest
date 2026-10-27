@@ -22,7 +22,7 @@ from typing import Any, Iterator
 
 FORMAT_VERSION = 1
 REQUIRED_TABLES = {
-    "users", "sessions", "tournaments", "bot_submissions", "entries", "matches",
+    "users", "sessions", "email_verification_tokens", "tournaments", "bot_submissions", "entries", "matches",
     "match_events", "audit_log",
 }
 

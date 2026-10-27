@@ -25,7 +25,7 @@ from ott.events import HUB
 
 SESSION_TTL = 12 * 60 * 60
 ENGINE_VERSION = "ott-1.0"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 LEASE_SECONDS = 30
 MAX_ATTEMPTS = 2
 LOG = logging.getLogger("ott.store")
@@ -255,6 +255,14 @@ class Store:
                 if "state_after_zlib" not in {row[1] for row in con.execute("PRAGMA table_info(match_events)")}:
                     con.execute("ALTER TABLE match_events ADD COLUMN state_after_zlib BLOB")
                 con.execute("PRAGMA user_version = 4")
+                version = 4
+            if version == 4:
+                con.execute("ALTER TABLE users ADD COLUMN email TEXT")
+                con.execute("ALTER TABLE users ADD COLUMN email_verified_at INTEGER")
+                con.execute("CREATE UNIQUE INDEX users_email_idx ON users(email COLLATE NOCASE) WHERE email IS NOT NULL")
+                con.execute("CREATE TABLE email_verification_tokens (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)")
+                con.execute("CREATE INDEX email_verification_expiry_idx ON email_verification_tokens(expires_at)")
+                con.execute("PRAGMA user_version = 5")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS submission_receipts_pending_entry ON submission_receipts(entry_id) WHERE status='QUEUED'")
             con.execute("CREATE INDEX IF NOT EXISTS submission_receipts_queue ON submission_receipts(status,received_at,id)")
             con.execute("CREATE INDEX IF NOT EXISTS submission_receipts_entry_status_idx ON submission_receipts(entry_id,status,received_at)")
@@ -282,6 +290,7 @@ class Store:
             con.execute("CREATE INDEX IF NOT EXISTS matches_running_order_idx ON matches(leg_no,round_no,pairing_no) WHERE status='RUNNING'")
             con.execute("CREATE INDEX IF NOT EXISTS matches_tournament_running_order_idx ON matches(tournament_id,leg_no,round_no,pairing_no) WHERE status='RUNNING'")
             con.execute("DELETE FROM sessions WHERE expires_at <= ?", (now(),))
+            con.execute("DELETE FROM email_verification_tokens WHERE expires_at <= ?", (now(),))
 
     # ---------------- users & sessions ----------------
     def create_user(self, username: str, password: str, role: str = "CONTESTANT") -> dict[str, Any]:
@@ -296,13 +305,64 @@ class Store:
                 raise StoreError(409, "USERNAME_TAKEN", "Username already exists.") from None
             return {"id": cur.lastrowid, "username": username, "role": role}
 
+    def create_pending_user(self, username: str, email: str, password: str) -> tuple[dict[str, Any], str]:
+        username, email = username.lower(), email.lower()
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        with self.tx() as con:
+            try:
+                cur = con.execute(
+                    "INSERT INTO users(username, email, password_hash, role, created_at) VALUES (?,?,?,?,?)",
+                    (username, email, _hash_password(password), "CONTESTANT", now()),
+                )
+            except sqlite3.IntegrityError:
+                raise StoreError(409, "ACCOUNT_TAKEN", "Username or email is already registered.") from None
+            user_id = int(cur.lastrowid)
+            con.execute(
+                "INSERT INTO email_verification_tokens(token_hash,user_id,expires_at) VALUES (?,?,?)",
+                (token_hash, user_id, now() + 24 * 60 * 60),
+            )
+        return {"id": user_id, "username": username, "email": email}, token
+
+    def verify_email(self, token: str) -> bool:
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        stamp = now()
+        with self.tx() as con:
+            row = con.execute(
+                "SELECT user_id FROM email_verification_tokens WHERE token_hash=? AND expires_at>?",
+                (token_hash, stamp),
+            ).fetchone()
+            if row is None:
+                return False
+            con.execute("UPDATE users SET email_verified_at=? WHERE id=?", (stamp, row["user_id"]))
+            con.execute("DELETE FROM email_verification_tokens WHERE user_id=?", (row["user_id"],))
+        return True
+
+    def resend_pending_verification(self, username: str, email: str, password: str) -> str | None:
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        with self.tx() as con:
+            row = con.execute(
+                "SELECT id,password_hash FROM users WHERE username=? AND email=? AND email_verified_at IS NULL",
+                (username.lower(), email.lower()),
+            ).fetchone()
+            if row is None or not _verify_password(password, row["password_hash"]):
+                return None
+            con.execute("DELETE FROM email_verification_tokens WHERE user_id=?", (row["id"],))
+            con.execute(
+                "INSERT INTO email_verification_tokens(token_hash,user_id,expires_at) VALUES (?,?,?)",
+                (token_hash, row["id"], now() + 24 * 60 * 60),
+            )
+        return token
+
     def verify_login(self, username: str, password: str) -> dict[str, Any] | None:
         with self.tx() as con:
-            row = con.execute("SELECT * FROM users WHERE username = ?", (username.lower(),)).fetchone()
+            identifier = username.lower()
+            row = con.execute("SELECT * FROM users WHERE username = ? OR email = ?", (identifier, identifier)).fetchone()
         # verify against a dummy hash when the user is unknown to keep timing similar
         encoded = row["password_hash"] if row else _DUMMY_PASSWORD_HASH
         ok = _verify_password(password, encoded)
-        if not row or not ok:
+        if not row or not ok or (row["email"] is not None and row["email_verified_at"] is None):
             return None
         return {"id": row["id"], "username": row["username"], "role": row["role"]}
 

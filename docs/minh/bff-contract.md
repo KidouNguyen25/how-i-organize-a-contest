@@ -7,7 +7,7 @@ Phiên bản 0.2 — đối chiếu với `ott/security.py`, `ott/api.py`, `ott/
 |---|---|
 | Đích | Chỉ `ORIGIN_URL` (var). Không nhận URL/path nội bộ từ client. |
 | Route | Allowlist method + path khớp bảng route `ott/api.py`. Ngoài allowlist: 404/405 JSON. `/api/v1/stream`: 404 `STREAM_DISABLED`. |
-| Header chuyển tiếp | `accept, accept-language, content-type, cookie, origin, x-csrf-token, user-agent, sec-fetch-site`. Mọi header khác (x-forwarded-*, host, cf-*, `x-contest-origin-key` do client gửi) bị bỏ. |
+| Header chuyển tiếp | Allowlist gồm `accept, accept-language, content-type, cookie, origin, x-csrf-token, user-agent, sec-fetch-site`. Worker tự đặt `X-Contest-Client-IP` từ `CF-Connecting-IP`; header do client gửi bị bỏ. Mọi header khác (x-forwarded-*, host, cf-*, `x-contest-origin-key`) bị bỏ. |
 | Key | Luôn gắn `X-Contest-Origin-Key: <secret ORIGIN_KEY>`; thêm `X-Request-ID`. |
 | Mutation | Bắt buộc `Origin` == `PUBLIC_ORIGIN` (kể cả login/register); body ≤ 1 MiB tính theo byte khi đọc (413), chỉ `application/json` (415). |
 | Redirect / retry | `redirect: manual`; origin trả 3xx → 502 `ORIGIN_REDIRECT`. Không tự retry (nhất là POST). Timeout 25 giây → 504. |
@@ -15,6 +15,7 @@ Phiên bản 0.2 — đối chiếu với `ott/security.py`, `ott/api.py`, `ott/
 | Cookie | Giữ `Set-Cookie`, **bỏ thuộc tính Domain** để host-only. |
 | Cache | Mọi `/api/*` và `/runtime-config.js`: `Cache-Control: no-store`. |
 | Lỗi | `{ "error": { "code", "message", "request_id" } }`; 429/503 kèm `Retry-After` khi có. |
+| Đăng ký email | Origin trả token xác minh nội bộ; Worker gửi qua Gmail SMTP TLS port 465 rồi chỉ trả `verification_required`. Lưu `GMAIL_ADDRESS` và `GMAIL_APP_PASSWORD` bằng Worker secrets. |
 
 ## Phía backend (B05) — đã đối chiếu source, chưa có acceptance staging
 

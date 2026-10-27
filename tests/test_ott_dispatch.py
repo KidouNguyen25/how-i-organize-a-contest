@@ -157,7 +157,7 @@ class DispatchTests(unittest.TestCase):
 
         migrated = Store(self.store.path)
         with migrated.tx() as con:
-            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 5)
             columns = {row[1] for row in con.execute("PRAGMA table_info(match_events)")}
             event = con.execute("SELECT state_after_json,state_after_zlib FROM match_events WHERE match_id=? AND sequence_no=1",
                                 (match_id,)).fetchone()

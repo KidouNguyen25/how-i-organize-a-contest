@@ -12,7 +12,7 @@ SupplementaryGroups=docker
 WorkingDirectory=/opt/contest
 EnvironmentFile=/etc/contest/demo.env
 Environment=TMPDIR=/srv/contest/work
-ExecStart=/opt/contest/.venv/bin/python -m ott serve --profile demo --data /srv/contest/data --runner docker --runtime-image ott-bot-runtime --source-allowlist /etc/contest/source-allowlist.json --host 127.0.0.1 --port 8080 --secure-cookie --no-register --disable-stream
+ExecStart=/opt/contest/.venv/bin/python -m ott serve --profile demo --data /srv/contest/data --runner docker --runtime-image ott-bot-runtime --source-allowlist /etc/contest/source-allowlist.json --host 127.0.0.1 --port 8080 --secure-cookie --allow-public-registration --disable-stream
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

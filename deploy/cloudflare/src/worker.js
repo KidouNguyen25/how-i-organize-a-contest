@@ -8,7 +8,7 @@ const TEXT_RESPONSE = new RegExp(`^/(bot-template|bots/${SEG}/source)$`);
 
 // Allowlist method + path (phần sau /api/v1). Khớp bảng route của ott/api.py.
 const ROUTES = [
-  ['POST', new RegExp('^/auth/(register|login|logout)$')],
+  ['POST', new RegExp('^/auth/(register|login|logout|verify-email)$')],
   ['GET', new RegExp('^/(me|stats|tournaments|live|bot-template|ops/status)$')],
   ['POST', new RegExp('^/ops/maintenance$')],
   ['POST', new RegExp('^/tournaments$')],
@@ -25,6 +25,90 @@ const METHOD_OK = (m, sub) => ROUTES.some(([rm, re]) => rm === m && re.test(sub)
 
 // Header client được phép chuyển tiếp. Mọi header khác (x-forwarded-*, x-contest-origin-key, cf-*, host...) bị bỏ.
 const FORWARD_HEADERS = ['accept', 'accept-language', 'content-type', 'cookie', 'origin', 'x-csrf-token', 'user-agent', 'sec-fetch-site'];
+const encoder = new TextEncoder();
+
+function base64(value) {
+  const bytes = typeof value === 'string' ? encoder.encode(value) : value;
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function sendVerificationEmail(env, recipient, verificationUrl) {
+  const sender = env.GMAIL_ADDRESS || '';
+  const password = (env.GMAIL_APP_PASSWORD || '').replace(/\s/g, '');
+  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(sender)
+      || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(recipient)
+      || !password) throw new Error('Mail configuration is missing.');
+
+  const { connect } = await import('cloudflare:sockets');
+  const socket = connect({ hostname: 'smtp.gmail.com', port: 465 }, { secureTransport: 'on' });
+  const reader = socket.readable.getReader();
+  const writer = socket.writable.getWriter();
+  let buffered = '';
+
+  async function readReply() {
+    const lines = [];
+    for (;;) {
+      const end = buffered.indexOf('\r\n');
+      if (end < 0) {
+        let timer;
+        let chunk;
+        try {
+          chunk = await Promise.race([
+            reader.read(),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('SMTP timeout.')), 10000); }),
+          ]);
+        } finally { clearTimeout(timer); }
+        if (chunk.done) throw new Error('SMTP connection closed.');
+        buffered += new TextDecoder().decode(chunk.value, { stream: true });
+        if (buffered.length > 16384) throw new Error('SMTP response too large.');
+        continue;
+      }
+      const line = buffered.slice(0, end);
+      buffered = buffered.slice(end + 2);
+      if (!/^\d{3}[ -]/.test(line)) throw new Error('Invalid SMTP response.');
+      lines.push(line);
+      if (line[3] === ' ') return { code: Number(line.slice(0, 3)), lines };
+    }
+  }
+
+  async function command(value, expected) {
+    await writer.write(encoder.encode(value + '\r\n'));
+    const result = await readReply();
+    if (!expected.includes(result.code)) throw new Error('SMTP command failed.');
+    return result;
+  }
+
+  try {
+    await socket.opened;
+    if ((await readReply()).code !== 220) throw new Error('SMTP greeting failed.');
+    await command('EHLO ott-arena-demo.workers.dev', [250]);
+    await command(`AUTH PLAIN ${base64(`\0${sender}\0${password}`)}`, [235]);
+    await command(`MAIL FROM:<${sender}>`, [250]);
+    await command(`RCPT TO:<${recipient}>`, [250, 251]);
+    await command('DATA', [354]);
+    const subject = base64('Xác minh tài khoản OTT Arena');
+    const body = base64(
+      `Bạn vừa đăng ký tài khoản OTT Arena. Mở liên kết sau để xác minh email:\n\n${verificationUrl}\n\n` +
+      'Liên kết hết hạn sau 24 giờ. Nếu bạn không đăng ký, hãy bỏ qua thư này.'
+    ).match(/.{1,76}/g).join('\r\n');
+    const message = [
+      `From: OTT Arena <${sender}>`, `To: ${recipient}`,
+      `Subject: =?UTF-8?B?${subject}?=`, `Date: ${new Date().toUTCString()}`,
+      `Message-ID: <${crypto.randomUUID()}@ott-arena-demo.workers.dev>`,
+      'MIME-Version: 1.0', 'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: base64', '', body,
+    ].join('\r\n') + '\r\n.\r\n';
+    await writer.write(encoder.encode(message));
+    await readReply().then((reply) => { if (reply.code !== 250) throw new Error('SMTP delivery failed.'); });
+    await command('QUIT', [221]);
+  } finally {
+    await reader.cancel().catch(() => {});
+    writer.releaseLock();
+    await socket.close().catch(() => {});
+  }
+}
 
 function json(status, code, message, requestId, extra = {}) {
   return new Response(JSON.stringify({ error: { code, message, request_id: requestId } }), {
@@ -115,6 +199,8 @@ async function handleApi(request, env, url, requestId) {
 
   const headers = new Headers();
   for (const name of FORWARD_HEADERS) { const v = request.headers.get(name); if (v !== null) headers.set(name, v); }
+  const clientIp = request.headers.get('CF-Connecting-IP');
+  if (clientIp) headers.set('X-Contest-Client-IP', clientIp);
   headers.set('X-Contest-Origin-Key', env.ORIGIN_KEY);   // luôn ghi đè, không bao giờ lấy từ client
   headers.set('X-Request-ID', requestId);
 
@@ -141,6 +227,29 @@ async function handleApi(request, env, url, requestId) {
     // Trang lỗi HTML của tunnel/edge hoặc index.html: không chuyển cho client.
     const down = res.status >= 500;
     return json(down ? 503 : 502, down ? 'ORIGIN_UNAVAILABLE' : 'BAD_ORIGIN_RESPONSE', 'Origin returned an unexpected response.', requestId, down ? { 'Retry-After': '10' } : {});
+  }
+
+  if (sub === '/auth/register' && res.status === 201) {
+    let registration;
+    try { registration = await res.json(); } catch { registration = null; }
+    if (!registration?.verification_required
+        || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(registration.email || '')
+        || !/^[A-Za-z0-9_-]{32,128}$/.test(registration.token || '')) {
+      return json(502, 'BAD_ORIGIN_RESPONSE', 'Origin returned an unexpected registration response.', requestId);
+    }
+    try {
+      const verifyUrl = `${publicOrigin(env, url)}/#/verify/${registration.token}`;
+      await sendVerificationEmail(env, registration.email, verifyUrl);
+    } catch {
+      return json(503, 'EMAIL_UNAVAILABLE', 'Could not send verification email. Retry signup shortly.', requestId, { 'Retry-After': '30' });
+    }
+    return new Response(JSON.stringify({ verification_required: true }), {
+      status: 202,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+        'X-Request-ID': requestId, 'X-Content-Type-Options': 'nosniff',
+      },
+    });
   }
 
   const out = new Headers();

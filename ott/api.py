@@ -43,6 +43,7 @@ from ott.tournament import Dispatcher, byes, iter_round_robin_rows, standings
 
 LOG = logging.getLogger("ott.api")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
+EMAIL_RE = re.compile(r"^[^\s@]{1,64}@[^\s@.]+(?:\.[^\s@.]+)+$")
 MAX_BODY = 1024 * 1024
 MAX_SOURCE = 256 * 1024
 MAX_JSON_DEPTH = 64
@@ -183,9 +184,11 @@ class ApiError(Exception):
 
 
 def make_app(store: Store, data_dir: Path, static_dir: Path, secure_cookie: bool = False, workers: int = 1,
-             open_registration: bool = True, *, policy: ServerPolicy | None = None) -> "App":
+             open_registration: bool = True, *, policy: ServerPolicy | None = None,
+             require_verified_email: bool = False) -> "App":
     app = App(store, data_dir, static_dir, secure_cookie, workers, policy or ServerPolicy())
-    app.open_registration = open_registration and not app.policy.demo
+    app.open_registration = open_registration and (not app.policy.demo or require_verified_email)
+    app.require_verified_email = require_verified_email
     return app
 
 
@@ -213,6 +216,7 @@ class App:
         self.auth_limiter = RateLimiter()
         self.login_limiter = RateLimiter()
         self.account_limiter = RateLimiter()
+        self.email_limiter = RateLimiter()
         self.compile_check_limiter = RateLimiter()
         self.open_registration = True
         self.routes: list[tuple[str, re.Pattern[str], Callable[..., Any], str]] = []
@@ -557,6 +561,26 @@ class App:
                 raise ApiError(400, "BAD_REQUEST", "Username must be 3-32 chars: letters, digits, underscore.")
             if not isinstance(password, str) or not 10 <= len(password.encode("utf-8")) <= 128:
                 raise ApiError(400, "BAD_REQUEST", "Password must be 10-128 bytes.")
+            if app.require_verified_email:
+                email = body.get("email")
+                if not isinstance(email, str) or len(email) > 254 or not EMAIL_RE.fullmatch(email):
+                    raise ApiError(400, "BAD_REQUEST", "A valid email address is required.")
+                email = email.strip().lower()
+                if not app.email_limiter.allow("signup:" + email, burst=2, per_second=1 / 300):
+                    raise ApiError(429, "RATE_LIMITED", "Try again later.")
+                try:
+                    user, token = app.store.create_pending_user(username, email, password)
+                except StoreError as exc:
+                    if exc.code != "ACCOUNT_TAKEN":
+                        raise
+                    token = app.store.resend_pending_verification(username, email, password)
+                    if token is None:
+                        raise
+                    user = {"email": email}
+                origin = app.policy.public_origin
+                if not origin:
+                    raise ApiError(503, "EMAIL_UNAVAILABLE", "Email verification is not configured.")
+                return 201, {"verification_required": True, "email": user["email"], "token": token}
             try:
                 user = app.store.create_user(username, password)
             except StoreError as exc:
@@ -567,8 +591,11 @@ class App:
         def login(ctx: Ctx) -> Any:
             body = ctx.json()
             username, password = body.get("username"), body.get("password")
-            if not isinstance(username, str) or not USERNAME_RE.fullmatch(username) or not isinstance(password, str):
-                raise ApiError(400, "BAD_REQUEST", "username and password are required.")
+            valid_identifier = (isinstance(username, str) and
+                                (USERNAME_RE.fullmatch(username) or
+                                 (len(username) <= 254 and EMAIL_RE.fullmatch(username))))
+            if not valid_identifier or not isinstance(password, str):
+                raise ApiError(400, "BAD_REQUEST", "username or email and password are required.")
             try:
                 valid_password = 1 <= len(password.encode("utf-8")) <= 128
             except UnicodeError:
@@ -583,6 +610,17 @@ class App:
             token, csrf = app.store.create_session(user["id"])
             ctx.set_session = token
             return 200, {"user": {"username": user["username"], "role": user["role"]}, "csrf_token": csrf}
+
+        @r("POST", "/auth/verify-email")
+        def verify_email(ctx: Ctx) -> Any:
+            if not app.require_verified_email:
+                raise ApiError(404, "NOT_FOUND", "No such endpoint.")
+            token = ctx.json().get("token")
+            if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
+                raise ApiError(400, "BAD_REQUEST", "Invalid verification link.")
+            if not app.store.verify_email(token):
+                raise ApiError(400, "INVALID_TOKEN", "Verification link is invalid or expired.")
+            return 200, {"verified": True}
 
         @r("POST", "/auth/logout")
         def logout(ctx: Ctx) -> Any:
@@ -1449,7 +1487,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._static(path)
                 return
             sub = path[len("/api/v1"):]
-            if sub in ("/auth/login", "/auth/register"):
+            if sub in ("/auth/login", "/auth/register", "/auth/verify-email"):
                 if not self.app.auth_limiter.allow("auth:" + self.request_ip, burst=30, per_second=1):
                     raise ApiError(429, "RATE_LIMITED", "Too many authentication requests.")
             if method != "GET" and maintenance_enabled(self.app.data_dir) and sub not in (
@@ -1478,7 +1516,7 @@ class Handler(BaseHTTPRequestHandler):
                 hit = regex.match(sub)
                 if not hit:
                     continue
-                if kind == "mut" and sub not in ("/auth/login", "/auth/register"):
+                if kind == "mut" and sub not in ("/auth/login", "/auth/register", "/auth/verify-email"):
                     if not user or not hmac.compare_digest(self.headers.get("X-CSRF-Token", "").encode("utf-8"), user["csrf_token"].encode("utf-8")):
                         if not user:
                             raise ApiError(401, "AUTH_REQUIRED", "Log in first.")

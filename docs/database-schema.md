@@ -2,14 +2,13 @@
 
 ## Phạm vi
 
-Phần **Legacy hiện có** mô tả schema do `judge/database.py` tạo. Phần **Đích OTT** mô tả schema cần bổ sung cho giải bot; chưa có trong code và chưa áp dụng migration. SQLite tiếp tục là database MVP.
+Phần **Legacy** mô tả schema do `judge/database.py` tạo. Phần **OTT hiện tại** mô tả database giải bot, `PRAGMA user_version=5`. SQLite tiếp tục là database MVP.
 
 ## Migration đích
 
-- Đọc `PRAGMA user_version` trong lúc khởi tạo database. Áp dụng migration tuần tự trong transaction; cập nhật version sau khi migration thành công.
-- Migration đầu giữ nguyên `users`, `sessions`, `submissions`; thêm `users.role TEXT NOT NULL DEFAULT 'CONTESTANT'` để backfill tài khoản legacy.
-- Không chạy `CREATE TABLE IF NOT EXISTS` thay cho migration cột. Sao lưu database/WAL trước migration và kiểm tra foreign key sau migration.
-- Không có migration OTT trong code hiện tại.
+- Đọc `PRAGMA user_version` lúc khởi tạo. Áp dụng migration tuần tự trong transaction; cập nhật version sau khi migration thành công.
+- Schema 5 thêm `users.email`, `users.email_verified_at` và bảng token xác minh. Tài khoản cũ giữ `email=NULL`; đăng nhập username tiếp tục hoạt động.
+- Sao lưu database/WAL trước migration và kiểm tra foreign key sau migration.
 
 ## Legacy hiện có
 
@@ -53,11 +52,15 @@ Chỉ mục `submissions_user_created_idx(user_id, created_at DESC)` và `submis
 
 Hai index trên có trong DDL hiện tại. Query claim xếp theo `rowid`; query history cũng xếp `rowid DESC`, nên index queue không xác định thứ tự FIFO hiện tại và index history không khớp thứ tự thực thi.
 
-## Schema đích OTT
+## OTT hiện tại (`user_version=5`)
 
 ### Mở rộng `users`
 
-Thêm `role TEXT NOT NULL DEFAULT 'CONTESTANT'`. Giá trị ứng dụng: `CONTESTANT`, `ORGANIZER`. Người vận hành cấp `ORGANIZER`; không cho đăng ký role tự do.
+Các cột OTT gồm `role TEXT NOT NULL DEFAULT 'CONTESTANT'`, `email TEXT` nullable và `email_verified_at INTEGER` nullable. Email có unique index không phân biệt hoa thường. Giá trị role: `CONTESTANT`, `ORGANIZER`; người vận hành cấp `ORGANIZER`, không cho đăng ký role tự do. Email chưa xác minh không thể đăng nhập.
+
+### `email_verification_tokens`
+
+Lưu SHA-256 token, user ID duy nhất và hạn 24 giờ. Xóa token sau xác minh và dọn token hết hạn lúc khởi động.
 
 ### `tournaments`
 
