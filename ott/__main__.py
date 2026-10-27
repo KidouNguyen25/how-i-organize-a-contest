@@ -111,7 +111,7 @@ def main() -> None:
     p_serve.add_argument("--web", type=Path, default=WEB_ROOT)
     p_serve.add_argument("--no-register", action="store_true")
     p_serve.add_argument("--allow-public-registration", action="store_true",
-                         help="enable public signup with verified Gmail email")
+                         help="enable public signup with username and password; email is not required")
     p_serve.add_argument("--secure-cookie", action="store_true")
     p_serve.add_argument("--no-dispatch", action="store_true", help="run a separate worker for matches; compilation remains in this API")
     p_serve.add_argument("--disable-stream", action="store_true")
@@ -223,8 +223,8 @@ def main() -> None:
             runtime_locks.enter_context(DataDirectoryLock(args.data, lock_name=".api-lock"))
             key = os.environ.get("CONTEST_ORIGIN_KEY")
             old_key = os.environ.get("CONTEST_ORIGIN_KEY_PREVIOUS")
-            if args.allow_public_registration and (args.no_register or not args.public_origin):
-                raise ValueError("Public email registration requires a public origin and cannot use --no-register.")
+            if args.allow_public_registration and args.no_register:
+                raise ValueError("Public registration cannot be combined with --no-register.")
             if bool(args.public_origin) != bool(key):
                 raise ValueError("Set both CONTEST_ORIGIN_KEY and PUBLIC_ORIGIN for a public gateway.")
             keys = tuple(value for value in (key, old_key) if value)
@@ -234,8 +234,7 @@ def main() -> None:
                                   demo=args.profile == "demo")
             open_registration = args.allow_public_registration or not (args.no_register or args.profile == "demo")
             app = make_app(store, args.data, args.web, args.secure_cookie or bool(keys),
-                           args.workers, open_registration, policy=policy,
-                           require_verified_email=args.allow_public_registration)
+                           args.workers, open_registration, policy=policy)
             server = serve(app, args.host, args.port)
             print(f"Competition API on http://{args.host}:{args.port} ({sandbox.kind})")
             try:

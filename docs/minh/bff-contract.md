@@ -15,7 +15,7 @@ Phiên bản 0.2 — đối chiếu với `ott/security.py`, `ott/api.py`, `ott/
 | Cookie | Giữ `Set-Cookie`, **bỏ thuộc tính Domain** để host-only. |
 | Cache | Mọi `/api/*` và `/runtime-config.js`: `Cache-Control: no-store`. |
 | Lỗi | `{ "error": { "code", "message", "request_id" } }`; 429/503 kèm `Retry-After` khi có. |
-| Đăng ký email | Origin trả token xác minh nội bộ; Worker gửi qua Gmail SMTP TLS port 465 rồi chỉ trả `verification_required`. Lưu `GMAIL_ADDRESS` và `GMAIL_APP_PASSWORD` bằng Worker secrets. |
+| Đăng ký | Worker chuyển tiếp đăng ký username/password; xác minh email tạm tắt. |
 
 ## Phía backend (B05) — đã đối chiếu source, chưa có acceptance staging
 

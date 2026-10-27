@@ -783,11 +783,10 @@ function pageAuth(mode) {
   const reg = mode === 'register';
   return `<div class="page"><section class="box login-box"><div class="box__top"><h1>${reg ? 'Đăng ký' : 'Đăng nhập'}</h1></div><form class="box-pad" data-form="${mode}">
     <div class="form-group"><label for="u">${reg ? 'Tên đăng nhập' : 'Tên đăng nhập hoặc email'}</label><input id="u" class="form-control" autocomplete="username" required minlength="${reg ? 3 : 1}" maxlength="${reg ? 32 : 254}" ${reg ? 'pattern="[A-Za-z0-9_]+"' : ''}></div>
-    ${reg ? '<div class="form-group"><label for="email">Email</label><input id="email" type="email" class="form-control" autocomplete="email" required maxlength="254"></div>' : ''}
     <div class="form-group"><label for="p">Mật khẩu</label><input id="p" type="password" class="form-control" autocomplete="${reg ? 'new-password' : 'current-password'}" required minlength="${reg ? 10 : 1}" maxlength="128">${reg ? '<div class="form-help">Tối thiểu 10 ký tự.</div>' : ''}</div>
     <div id="auth-err" class="form-help" aria-live="polite" style="color:#e57373;min-height:1.2rem"></div>
     <button class="button green big" style="width:100%" type="submit">${reg ? 'Tạo tài khoản' : 'Đăng nhập'}</button>
-    ${reg ? '<p class="form-help">Cần xác minh email trước khi đăng nhập.</p>' : ''}
+    ${reg ? '<p class="form-help">Đăng ký bằng tên đăng nhập và mật khẩu.</p>' : ''}
     <p class="form-help" style="text-align:center;margin-top:1rem">${reg ? 'Đã có tài khoản? <a href="#/login">Đăng nhập</a>' : 'Chưa có tài khoản? <a href="#/register">Đăng ký</a>'}</p></form></section></div>`;
 }
 function pageVerify(token) {
@@ -1004,9 +1003,9 @@ document.addEventListener('submit', async (e) => {
     err.textContent = '';
     try {
       if (kind === 'register') {
-        await api('POST', '/auth/register', { username, email: $('#email').value.trim(), password });
+        await api('POST', '/auth/register', { username, password });
         err.style.color = '#64c78a';
-        err.textContent = 'Đã gửi email xác minh. Mở hộp thư để kích hoạt tài khoản.';
+        err.textContent = 'Tài khoản đã tạo. Đăng nhập để tiếp tục.';
         return;
       }
       const r = await api('POST', '/auth/login', { username, password });

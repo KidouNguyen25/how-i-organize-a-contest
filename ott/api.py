@@ -187,7 +187,7 @@ def make_app(store: Store, data_dir: Path, static_dir: Path, secure_cookie: bool
              open_registration: bool = True, *, policy: ServerPolicy | None = None,
              require_verified_email: bool = False) -> "App":
     app = App(store, data_dir, static_dir, secure_cookie, workers, policy or ServerPolicy())
-    app.open_registration = open_registration and (not app.policy.demo or require_verified_email)
+    app.open_registration = open_registration
     app.require_verified_email = require_verified_email
     return app
 
@@ -216,7 +216,7 @@ class App:
         self.auth_limiter = RateLimiter()
         self.login_limiter = RateLimiter()
         self.account_limiter = RateLimiter()
-        self.email_limiter = RateLimiter()
+        self.signup_limiter = RateLimiter()
         self.compile_check_limiter = RateLimiter()
         self.open_registration = True
         self.routes: list[tuple[str, re.Pattern[str], Callable[..., Any], str]] = []
@@ -566,7 +566,7 @@ class App:
                 if not isinstance(email, str) or len(email) > 254 or not EMAIL_RE.fullmatch(email):
                     raise ApiError(400, "BAD_REQUEST", "A valid email address is required.")
                 email = email.strip().lower()
-                if not app.email_limiter.allow("signup:" + email, burst=2, per_second=1 / 300):
+                if not app.signup_limiter.allow("signup:" + email, burst=2, per_second=1 / 300):
                     raise ApiError(429, "RATE_LIMITED", "Try again later.")
                 try:
                     user, token = app.store.create_pending_user(username, email, password)
@@ -581,6 +581,8 @@ class App:
                 if not origin:
                     raise ApiError(503, "EMAIL_UNAVAILABLE", "Email verification is not configured.")
                 return 201, {"verification_required": True, "email": user["email"], "token": token}
+            if not app.signup_limiter.allow("signup:" + ctx.client_ip, burst=2, per_second=1 / 300):
+                raise ApiError(429, "RATE_LIMITED", "Try again later.")
             try:
                 user = app.store.create_user(username, password)
             except StoreError as exc:

@@ -231,25 +231,26 @@ async function handleApi(request, env, url, requestId) {
 
   if (sub === '/auth/register' && res.status === 201) {
     let registration;
-    try { registration = await res.json(); } catch { registration = null; }
-    if (!registration?.verification_required
-        || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(registration.email || '')
-        || !/^[A-Za-z0-9_-]{32,128}$/.test(registration.token || '')) {
-      return json(502, 'BAD_ORIGIN_RESPONSE', 'Origin returned an unexpected registration response.', requestId);
+    try { registration = await res.clone().json(); } catch { registration = null; }
+    if (registration?.verification_required) {
+      if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(registration.email || '')
+          || !/^[A-Za-z0-9_-]{32,128}$/.test(registration.token || '')) {
+        return json(502, 'BAD_ORIGIN_RESPONSE', 'Origin returned an unexpected registration response.', requestId);
+      }
+      try {
+        const verifyUrl = `${publicOrigin(env, url)}/#/verify/${registration.token}`;
+        await sendVerificationEmail(env, registration.email, verifyUrl);
+      } catch {
+        return json(503, 'EMAIL_UNAVAILABLE', 'Could not send verification email. Retry signup shortly.', requestId, { 'Retry-After': '30' });
+      }
+      return new Response(JSON.stringify({ verification_required: true }), {
+        status: 202,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+          'X-Request-ID': requestId, 'X-Content-Type-Options': 'nosniff',
+        },
+      });
     }
-    try {
-      const verifyUrl = `${publicOrigin(env, url)}/#/verify/${registration.token}`;
-      await sendVerificationEmail(env, registration.email, verifyUrl);
-    } catch {
-      return json(503, 'EMAIL_UNAVAILABLE', 'Could not send verification email. Retry signup shortly.', requestId, { 'Retry-After': '30' });
-    }
-    return new Response(JSON.stringify({ verification_required: true }), {
-      status: 202,
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
-        'X-Request-ID': requestId, 'X-Content-Type-Options': 'nosniff',
-      },
-    });
   }
 
   const out = new Headers();

@@ -18,7 +18,7 @@ paths:
   /auth/register:
     post:
       tags: [Auth]
-      summary: Đăng ký thí sinh và gửi email xác minh
+      summary: Đăng ký thí sinh bằng tên đăng nhập và mật khẩu
       security: []
       requestBody:
         required: true
@@ -27,51 +27,24 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [username, email, password]
+              required: [username, password]
               properties:
                 username: { type: string, minLength: 3, maxLength: 32, pattern: '^[A-Za-z0-9_]+$' }
-                email: { type: string, format: email, maxLength: 254 }
                 password: { type: string, minLength: 10, maxLength: 128, description: UTF-8 bytes are limited to 128. }
       responses:
-        '202':
-          description: Verification email sent; token is not returned to client.
+        '201':
+          description: Account created; email verification is temporarily disabled.
           content:
             application/json:
               schema:
                 type: object
-                required: [verification_required]
+                required: [username, role]
                 properties:
-                  verification_required: { const: true }
+                  username: { type: string }
+                  role: { const: CONTESTANT }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
         '429': { $ref: '#/components/responses/RateLimited' }
-        '503': { description: Email delivery unavailable; retry signup. }
-  /auth/verify-email:
-    post:
-      tags: [Auth]
-      summary: Xác minh email bằng token một lần
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [token]
-              properties:
-                token: { type: string, minLength: 32, maxLength: 128 }
-      responses:
-        '200':
-          description: Email verified.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [verified]
-                properties:
-                  verified: { const: true }
-        '400': { $ref: '#/components/responses/BadRequest' }
   /auth/login:
     post:
       tags: [Auth]
@@ -86,7 +59,7 @@ paths:
               additionalProperties: false
               required: [username, password]
               properties:
-                username: { type: string, minLength: 1, maxLength: 254, description: Username or verified email address. }
+                username: { type: string, minLength: 1, maxLength: 32, description: Username. }
                 password: { type: string, minLength: 1, maxLength: 128 }
       responses:
         '200':
